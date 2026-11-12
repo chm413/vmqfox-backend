@@ -397,7 +397,7 @@ func runAdminInit(ctx context.Context, opts AdminInitOptions) error {
 		Username:     username,
 		PasswordHash: passwordHash,
 		Enabled:      true,
-		UpdatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now(),
 	}
 	if err := repo.Save(ctx, credential); err != nil {
 		return fmt.Errorf("保存管理员数据失败: %w", err)

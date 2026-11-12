@@ -24,7 +24,7 @@ const CSPNonceKey = "csp_nonce"
 //     不改变现有嵌入行为。
 //   - HSTS 只在请求确实经由 HTTPS 到达时下发。当前部署仍允许 HTTP 监控端，
 //     无条件下发 HSTS 会让浏览器强制升级并中断这些客户端。
-func SecurityHeaders() gin.HandlerFunc {
+func SecurityHeaders(trustedProxies ClientIPResolver) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		nonce := newCSPNonce()
 		c.Set(CSPNonceKey, nonce)
@@ -35,7 +35,7 @@ func SecurityHeaders() gin.HandlerFunc {
 		c.Header("Cross-Origin-Opener-Policy", "same-origin")
 		c.Header("Content-Security-Policy", buildCSP(nonce))
 
-		if requestIsHTTPS(c) {
+		if requestIsHTTPS(c, trustedProxies) {
 			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 
@@ -82,14 +82,17 @@ func newCSPNonce() string {
 }
 
 // requestIsHTTPS 判断请求真实到达协议。直连时看 TLS，网关终止 TLS 时看转发头。
-// 转发头只有在 Gin 可信代理列表命中时才由 RemoteIP 之外的来源填充，
-// 这里与限流共用同一份可信代理配置。
-func requestIsHTTPS(c *gin.Context) bool {
+// 转发头只在 TCP 对端命中可信代理白名单时才采信：否则任意客户端都能通过伪造
+// X-Forwarded-Proto 影响 HSTS 下发，与「转发头仅由可信代理解析」的策略不一致。
+func requestIsHTTPS(c *gin.Context, trustedProxies ClientIPResolver) bool {
 	if c.Request.TLS != nil {
 		return true
 	}
 	forwardedProto := c.GetHeader("X-Forwarded-Proto")
 	if forwardedProto == "" {
+		return false
+	}
+	if remote := parseHost(c.Request.RemoteAddr); remote == nil || !trustedProxies.isTrusted(remote) {
 		return false
 	}
 	// 多级代理会拼接为 "https, http"，只取最靠近客户端的一段。

@@ -100,7 +100,10 @@ type OrderRepository interface {
 	List(ctx context.Context, filter OrderFilter) (OrderPage, error)
 	Statistics(ctx context.Context, dayStart, dayEnd time.Time) (OrderStatistics, error)
 	Create(ctx context.Context, value order.Order) (order.Order, error)
-	FindPendingForUpdate(ctx context.Context, typ payment.Type, reallyPriceCents int64) (order.Order, error)
+	// FindPendingForUpdate 只匹配「付款发生之前创建」的待支付订单，避免后续同额订单吃掉历史付款。
+	FindPendingForUpdate(ctx context.Context, typ payment.Type, reallyPriceCents int64, createdBefore time.Time) (order.Order, error)
+	// FindReopenableForUpdate 匹配刚刚被超时关闭、但付款其实已经到账的订单，用于关闭/到账竞态的回补。
+	FindReopenableForUpdate(ctx context.Context, typ payment.Type, reallyPriceCents int64, createdBefore, closedAfter time.Time) (order.Order, error)
 	FindExpiredPendingForUpdate(ctx context.Context, before time.Time, limit int) ([]order.Order, error)
 	Transition(ctx context.Context, id int64, from, to order.Status, changedAt time.Time) (bool, error)
 	Delete(ctx context.Context, id int64) (bool, error)
@@ -138,7 +141,10 @@ type QRCodeRepository interface {
 type PriceLockRepository interface {
 	TryAcquire(ctx context.Context, orderID string, paymentType payment.Type, amountCents int64) (bool, error)
 	ReleaseByOrderID(ctx context.Context, orderID string) error
-	ReleaseBefore(ctx context.Context, before time.Time) error
+	// ReleaseByOrdersBefore 以订单为基准释放价格锁，保证「释放」与「删除订单」用的是同一批行。
+	ReleaseByOrdersBefore(ctx context.Context, before time.Time) error
+	// ReleaseOrphaned 清理已经没有关联订单的残留价格锁，避免金额被永久占死。
+	ReleaseOrphaned(ctx context.Context) error
 }
 
 // PaymentEvent 保留 Android 原始时间戳，唯一 EventKey 用于抵御客户端重试造成的重复到账。
@@ -152,6 +158,8 @@ type PaymentEvent struct {
 
 type PaymentEventRepository interface {
 	RecordIfNew(ctx context.Context, event PaymentEvent) (bool, error)
+	// PruneBefore 清理过期的到账事件，防止幂等表无限增长。
+	PruneBefore(ctx context.Context, before time.Time) (int64, error)
 }
 
 type OutboxMessage struct {
@@ -171,6 +179,10 @@ type OutboxRepository interface {
 	ClaimPending(ctx context.Context, now time.Time, limit int, leaseDuration time.Duration) ([]OutboxMessage, error)
 	MarkDelivered(ctx context.Context, id, leaseToken string, deliveredAt time.Time) error
 	MarkFailed(ctx context.Context, id, leaseToken string, attempts int, nextAttemptAt time.Time, reason string) error
+	// MarkDead 把超过重试上限的消息转为终态，停止继续重试。
+	MarkDead(ctx context.Context, id, leaseToken string, attempts int, reason string) error
+	// PruneDeliveredBefore 清理已投递的历史消息，避免 outbox 无上限增长。
+	PruneDeliveredBefore(ctx context.Context, before time.Time) (int64, error)
 }
 
 type Notification struct {

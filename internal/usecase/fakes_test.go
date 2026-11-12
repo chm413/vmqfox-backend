@@ -143,7 +143,9 @@ func (grantingPriceLocks) TryAcquire(context.Context, string, payment.Type, int6
 
 func (grantingPriceLocks) ReleaseByOrderID(context.Context, string) error { return nil }
 
-func (grantingPriceLocks) ReleaseBefore(context.Context, time.Time) error { return nil }
+func (grantingPriceLocks) ReleaseByOrdersBefore(context.Context, time.Time) error { return nil }
+
+func (grantingPriceLocks) ReleaseOrphaned(context.Context) error { return nil }
 
 // recordingOutbox 记录入队消息，供需要断言通知副作用的用例使用。
 type recordingOutbox struct{ messages []port.OutboxMessage }
@@ -163,12 +165,22 @@ func (o *recordingOutbox) MarkFailed(context.Context, string, string, int, time.
 	return nil
 }
 
+func (o *recordingOutbox) MarkDead(context.Context, string, string, int, string) error {
+	return nil
+}
+
+func (o *recordingOutbox) PruneDeliveredBefore(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
+
 // newEventsRepository 让每次推送都被视为新到账事件。
 type newEventsRepository struct{}
 
 func (newEventsRepository) RecordIfNew(context.Context, port.PaymentEvent) (bool, error) {
 	return true, nil
 }
+
+func (newEventsRepository) PruneBefore(context.Context, time.Time) (int64, error) { return 0, nil }
 
 // stubOrderRepository 为 16 方法的宽接口 port.OrderRepository 提供空实现基座。
 // 测试通过嵌入它并覆写少数方法来表达意图，不必为无关方法重复写样板。
@@ -214,7 +226,11 @@ func (stubOrderRepository) Create(_ context.Context, value order.Order) (order.O
 	return value, nil
 }
 
-func (stubOrderRepository) FindPendingForUpdate(context.Context, payment.Type, int64) (order.Order, error) {
+func (stubOrderRepository) FindPendingForUpdate(context.Context, payment.Type, int64, time.Time) (order.Order, error) {
+	return order.Order{}, port.ErrNotFound
+}
+
+func (stubOrderRepository) FindReopenableForUpdate(context.Context, payment.Type, int64, time.Time, time.Time) (order.Order, error) {
 	return order.Order{}, port.ErrNotFound
 }
 

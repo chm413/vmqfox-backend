@@ -58,7 +58,8 @@ func (r *QRCodeRepository) List(ctx context.Context, filter port.QRCodeFilter) (
 }
 
 func (r *QRCodeRepository) Create(ctx context.Context, value qrcode.QRCode) (qrcode.QRCode, error) {
-	now := time.Now().UTC()
+	// 与订单表统一使用进程本地时区，避免 DATETIME 混写。
+	now := time.Now()
 	row := QRCodeRow{
 		ID:          value.ID,
 		PayURL:      value.PayURL,
@@ -87,7 +88,7 @@ func (r *QRCodeRepository) SetState(ctx context.Context, id int64, from, to qrco
 		Where("id = ? AND state = ?", id, int(from)).
 		Updates(map[string]any{
 			"state":      int(to),
-			"updated_at": time.Now().UTC(),
+			"updated_at": time.Now(),
 		})
 	return result.RowsAffected == 1, result.Error
 }

@@ -59,7 +59,7 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 
 	r.Use(
 		middleware.RequestMetadata(),
-		middleware.SecurityHeaders(),
+		middleware.SecurityHeaders(clientIPResolver),
 		middleware.Recovery(deps.Logger),
 		middleware.AccessLog(deps.Logger, clientIPResolver),
 		middleware.CORS(deps.Origin),

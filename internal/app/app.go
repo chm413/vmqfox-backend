@@ -120,6 +120,7 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 		Clock:        clock,
 		PublicTokens: publicTokens,
 		SignTTL:      cfg.Jobs.MonitorSignTTL,
+		MatchSkew:    cfg.Jobs.MonitorMatchSkew,
 	})
 	if err != nil {
 		return nil, err
@@ -133,6 +134,7 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 			Outbox:       outbox,
 			Notifier:     httpclient.NewNotifier(nil, cfg.Outbound),
 			Clock:        clock,
+			MaxAttempts:  cfg.Jobs.NotificationMaxAttempts,
 		})
 		if serviceErr != nil {
 			return nil, serviceErr
@@ -142,6 +144,7 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 			AttemptTimeout: cfg.Jobs.NotificationAttemptTimeout,
 			LeaseDuration:  cfg.Jobs.NotificationLeaseDuration,
 			BatchSize:      cfg.Jobs.NotificationBatchSize,
+			Concurrency:    cfg.Jobs.NotificationConcurrency,
 		}, logger)
 		if workerErr != nil {
 			return nil, workerErr
@@ -153,6 +156,9 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 			PriceLocks:   priceLocks,
 			Settings:     settings,
 			Clock:        clock,
+			Events:       paymentEvents,
+			Outbox:       outbox,
+			Retention:    cfg.Jobs.HistoryRetention,
 		})
 		if serviceErr != nil {
 			return nil, serviceErr

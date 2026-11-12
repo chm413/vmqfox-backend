@@ -17,6 +17,8 @@ import (
 const (
 	outboxPending   = 0
 	outboxDelivered = 1
+	// outboxDead 是超过重试上限的终态，不再被 ClaimPending 领取。
+	outboxDead = 2
 )
 
 type OutboxRepository struct {
@@ -151,13 +153,6 @@ func (r *OutboxRepository) MarkFailed(ctx context.Context, id, leaseToken string
 	if leaseToken == "" || attempts < 1 {
 		return port.ErrConflict
 	}
-	reason = strings.ToValidUTF8(reason, "�")
-	if len(reason) > 1000 {
-		reason = reason[:1000]
-		for !utf8.ValidString(reason) {
-			reason = reason[:len(reason)-1]
-		}
-	}
 	result := databaseFromContext(ctx, r.db).
 		Model(&NotificationOutboxRow{}).
 		Where("id = ? AND status = ? AND lease_token = ?", id, outboxPending, leaseToken).
@@ -166,7 +161,7 @@ func (r *OutboxRepository) MarkFailed(ctx context.Context, id, leaseToken string
 			"next_attempt_at": nextAttemptAt,
 			"lease_token":     "",
 			"locked_until":    nil,
-			"last_error":      reason,
+			"last_error":      truncateReason(reason),
 		})
 	if result.Error != nil {
 		return result.Error
@@ -175,6 +170,50 @@ func (r *OutboxRepository) MarkFailed(ctx context.Context, id, leaseToken string
 		return port.ErrConflict
 	}
 	return nil
+}
+
+// MarkDead 把超过重试上限的消息转为终态，避免一条永远失败的商户回调无限重试。
+func (r *OutboxRepository) MarkDead(ctx context.Context, id, leaseToken string, attempts int, reason string) error {
+	if leaseToken == "" || attempts < 1 {
+		return port.ErrConflict
+	}
+	result := databaseFromContext(ctx, r.db).
+		Model(&NotificationOutboxRow{}).
+		Where("id = ? AND status = ? AND lease_token = ?", id, outboxPending, leaseToken).
+		Updates(map[string]any{
+			"status":       outboxDead,
+			"attempts":     attempts,
+			"lease_token":  "",
+			"locked_until": nil,
+			"last_error":   truncateReason(reason),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return port.ErrConflict
+	}
+	return nil
+}
+
+// PruneDeliveredBefore 清理已投递与已放弃的历史消息，控制 outbox 体积。
+func (r *OutboxRepository) PruneDeliveredBefore(ctx context.Context, before time.Time) (int64, error) {
+	result := databaseFromContext(ctx, r.db).
+		Where("status IN (?, ?) AND COALESCE(delivered_at, created_at) < ?", outboxDelivered, outboxDead, before).
+		Delete(&NotificationOutboxRow{})
+	return result.RowsAffected, result.Error
+}
+
+func truncateReason(reason string) string {
+	reason = strings.ToValidUTF8(reason, "�")
+	if len(reason) <= 1000 {
+		return reason
+	}
+	reason = reason[:1000]
+	for !utf8.ValidString(reason) {
+		reason = reason[:len(reason)-1]
+	}
+	return reason
 }
 
 func newLeaseToken() (string, error) {

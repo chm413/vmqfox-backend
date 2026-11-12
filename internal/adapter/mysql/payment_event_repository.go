@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"time"
 
 	"github.com/hulisang/vmqfox-backend/internal/port"
 	"gorm.io/gorm"
@@ -31,6 +32,12 @@ func (r *PaymentEventRepository) RecordIfNew(ctx context.Context, event port.Pay
 		return false, nil
 	}
 	return false, result.Error
+}
+
+// PruneBefore 清理超过保留期的到账事件；幂等只需覆盖重放窗口，无需永久保留。
+func (r *PaymentEventRepository) PruneBefore(ctx context.Context, before time.Time) (int64, error) {
+	result := databaseFromContext(ctx, r.db).Where("created_at < ?", before).Delete(&PaymentEventRow{})
+	return result.RowsAffected, result.Error
 }
 
 var _ port.PaymentEventRepository = (*PaymentEventRepository)(nil)

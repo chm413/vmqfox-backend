@@ -5,11 +5,15 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/setting"
 	"github.com/hulisang/vmqfox-backend/internal/port"
 )
+
+// pruneInterval 控制历史清理频率：生命周期任务每 10 秒一轮，清理一小时一次足够。
+const pruneInterval = time.Hour
 
 type LifecycleServiceDeps struct {
 	Transactions port.TransactionManager
@@ -17,11 +21,16 @@ type LifecycleServiceDeps struct {
 	PriceLocks   port.PriceLockRepository
 	Settings     port.SettingRepository
 	Clock        port.Clock
+	// 以下两项与 Retention 均为可选：未提供时跳过历史清理，保持旧行为。
+	Events    port.PaymentEventRepository
+	Outbox    port.OutboxRepository
+	Retention time.Duration
 }
 
 type LifecycleStats struct {
-	ClosedOrders int
-	MonitorState string
+	ClosedOrders  int
+	MonitorState  string
+	PrunedRecords int64
 }
 
 // LifecycleService 集中处理时间驱动的状态变化，避免查询请求产生写库副作用。
@@ -31,6 +40,12 @@ type LifecycleService struct {
 	priceLocks   port.PriceLockRepository
 	settings     port.SettingRepository
 	clock        port.Clock
+	events       port.PaymentEventRepository
+	outbox       port.OutboxRepository
+	retention    time.Duration
+
+	pruneMu   sync.Mutex
+	lastPrune time.Time
 }
 
 func NewLifecycleService(deps LifecycleServiceDeps) (*LifecycleService, error) {
@@ -43,6 +58,9 @@ func NewLifecycleService(deps LifecycleServiceDeps) (*LifecycleService, error) {
 		priceLocks:   deps.PriceLocks,
 		settings:     deps.Settings,
 		clock:        deps.Clock,
+		events:       deps.Events,
+		outbox:       deps.Outbox,
+		retention:    deps.Retention,
 	}, nil
 }
 
@@ -54,10 +72,37 @@ func (s *LifecycleService) Maintain(ctx context.Context, heartbeatTimeout time.D
 	now := s.clock.Now()
 	monitorState, monitorErr := s.refreshMonitorState(ctx, now, heartbeatTimeout)
 	closedOrders, expiryErr := s.closeExpiredOrders(ctx, now, batchSize)
+	pruned, pruneErr := s.pruneHistory(ctx, now)
 	return LifecycleStats{
-		ClosedOrders: closedOrders,
-		MonitorState: monitorState,
-	}, errors.Join(monitorErr, expiryErr)
+		ClosedOrders:  closedOrders,
+		MonitorState:  monitorState,
+		PrunedRecords: pruned,
+	}, errors.Join(monitorErr, expiryErr, pruneErr)
+}
+
+// pruneHistory 清理过期的到账事件与已完结的通知消息，防止幂等表与 outbox 无限增长。
+// 清理失败不影响订单状态推进，只作为独立错误上报。
+func (s *LifecycleService) pruneHistory(ctx context.Context, now time.Time) (int64, error) {
+	if s.retention <= 0 || s.events == nil || s.outbox == nil {
+		return 0, nil
+	}
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	if !s.lastPrune.IsZero() && now.Sub(s.lastPrune) < pruneInterval {
+		return 0, nil
+	}
+
+	cutoff := now.Add(-s.retention)
+	events, err := s.events.PruneBefore(ctx, cutoff)
+	if err != nil {
+		return 0, wrap(CodeDependency, "清理历史到账事件失败", err)
+	}
+	messages, err := s.outbox.PruneDeliveredBefore(ctx, cutoff)
+	if err != nil {
+		return events, wrap(CodeDependency, "清理历史通知消息失败", err)
+	}
+	s.lastPrune = now
+	return events + messages, nil
 }
 
 func (s *LifecycleService) refreshMonitorState(ctx context.Context, now time.Time, heartbeatTimeout time.Duration) (string, error) {

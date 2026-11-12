@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/order"
@@ -18,6 +19,8 @@ type NotificationServiceDeps struct {
 	Outbox       port.OutboxRepository
 	Notifier     port.Notifier
 	Clock        port.Clock
+	// MaxAttempts 是单条通知的最大投递次数，超过后转入终态，避免无限重试。
+	MaxAttempts int
 }
 
 type NotificationService struct {
@@ -26,7 +29,11 @@ type NotificationService struct {
 	outbox       port.OutboxRepository
 	notifier     port.Notifier
 	clock        port.Clock
+	maxAttempts  int
 }
+
+// defaultNotificationMaxAttempts 与指数退避配合，覆盖约 8 小时的商户不可用窗口。
+const defaultNotificationMaxAttempts = 20
 
 type DeliveryStats struct {
 	Claimed   int
@@ -38,12 +45,17 @@ func NewNotificationService(deps NotificationServiceDeps) (*NotificationService,
 	if deps.Transactions == nil || deps.Orders == nil || deps.Outbox == nil || deps.Notifier == nil || deps.Clock == nil {
 		return nil, errors.New("通知用例依赖不完整")
 	}
+	maxAttempts := deps.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultNotificationMaxAttempts
+	}
 	return &NotificationService{
 		transactions: deps.Transactions,
 		orders:       deps.Orders,
 		outbox:       deps.Outbox,
 		notifier:     deps.Notifier,
 		clock:        deps.Clock,
+		maxAttempts:  maxAttempts,
 	}, nil
 }
 
@@ -135,6 +147,7 @@ func (s *NotificationService) settleDelivered(ctx context.Context, message port.
 func (s *NotificationService) settleFailed(ctx context.Context, message port.OutboxMessage, reason string, now time.Time) error {
 	attempts := message.Attempts + 1
 	nextAttemptAt := now.Add(notificationBackoff(attempts))
+	dead := attempts >= s.maxAttempts
 	return s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
 		value, err := s.orders.FindByOrderIDForUpdate(txCtx, message.AggregateID)
 		if err != nil {
@@ -155,6 +168,10 @@ func (s *NotificationService) settleFailed(ctx context.Context, message port.Out
 		} else if value.State != order.StatusNotifyFailed {
 			return fail(CodeInvalidState, "订单不处于可通知状态")
 		}
+		// 付款事实已经确认，重试耗尽只终止通知投递，绝不回退订单的已支付状态。
+		if dead {
+			return s.outbox.MarkDead(txCtx, message.ID, message.LeaseToken, attempts, reason)
+		}
 		if err := s.outbox.MarkFailed(txCtx, message.ID, message.LeaseToken, attempts, nextAttemptAt, reason); err != nil {
 			return wrap(CodeDependency, "记录通知失败结果异常", err)
 		}
@@ -163,8 +180,12 @@ func (s *NotificationService) settleFailed(ctx context.Context, message port.Out
 }
 
 func notificationSucceeded(result port.NotificationResult, err error) bool {
-	// 只接受成功状态和字节级精确正文。
-	return err == nil && result.StatusCode >= http.StatusOK && result.StatusCode < http.StatusMultipleChoices && string(result.Body) == "success"
+	if err != nil || result.StatusCode < http.StatusOK || result.StatusCode >= http.StatusMultipleChoices {
+		return false
+	}
+	// 容忍商户端返回 "success\n"/"Success" 或 2xx 空正文；非空且非 success 的正文仍然判失败并重试。
+	body := strings.TrimSpace(string(result.Body))
+	return body == "" || strings.EqualFold(body, "success")
 }
 
 func notificationFailure(result port.NotificationResult, err error) string {

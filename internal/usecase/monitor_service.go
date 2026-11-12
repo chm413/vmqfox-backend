@@ -22,6 +22,15 @@ const notificationTopic = "order.paid.notify"
 // defaultMonitorSignTTL 是挂机端签名时间戳的默认允许偏移窗口。
 const defaultMonitorSignTTL = 5 * time.Minute
 
+const (
+	// defaultMonitorMatchSkew 是匹配订单时允许的挂机端时钟偏差：
+	// 用「到账时间 + 偏差」作为订单创建时间上界，使「付款之后才创建的订单」不可能被这笔付款结算。
+	defaultMonitorMatchSkew = time.Minute
+	// closedReopenWindow 是订单被超时关闭后，仍允许由真实到账回补的时间窗口。
+	// 覆盖「关闭事务先提交、到账推送随后取得行锁」的竞态，避免用户的付款被记成无订单转账。
+	closedReopenWindow = 10 * time.Minute
+)
+
 type HeartbeatInput struct {
 	Timestamp string
 	Sign      string
@@ -56,6 +65,8 @@ type MonitorServiceDeps struct {
 	Clock        port.Clock
 	PublicTokens port.PublicTokenGenerator
 	SignTTL      time.Duration
+	// MatchSkew 是匹配订单时容忍的挂机端时钟偏差；必须不小于设备的实际时钟误差。
+	MatchSkew time.Duration
 }
 
 type MonitorService struct {
@@ -68,6 +79,7 @@ type MonitorService struct {
 	clock        port.Clock
 	publicTokens port.PublicTokenGenerator
 	signTTL      time.Duration
+	matchSkew    time.Duration
 }
 
 func NewMonitorService(deps MonitorServiceDeps) (*MonitorService, error) {
@@ -80,6 +92,14 @@ func NewMonitorService(deps MonitorServiceDeps) (*MonitorService, error) {
 		// 配置缺失时回退到默认窗口，避免误配置把重放保护整体关掉。
 		signTTL = defaultMonitorSignTTL
 	}
+	matchSkew := deps.MatchSkew
+	if matchSkew <= 0 {
+		matchSkew = defaultMonitorMatchSkew
+	}
+	if matchSkew > signTTL {
+		// 匹配窗口大于签名容忍窗口没有意义，且会放大错配风险。
+		matchSkew = signTTL
+	}
 	return &MonitorService{
 		transactions: deps.Transactions,
 		orders:       deps.Orders,
@@ -90,6 +110,7 @@ func NewMonitorService(deps MonitorServiceDeps) (*MonitorService, error) {
 		clock:        deps.Clock,
 		publicTokens: deps.PublicTokens,
 		signTTL:      signTTL,
+		matchSkew:    matchSkew,
 	}, nil
 }
 
@@ -158,6 +179,12 @@ func (s *MonitorService) Push(ctx context.Context, input PaymentPushInput) (Paym
 	if err := s.checkTimestampFreshness(input.Timestamp, now); err != nil {
 		return PaymentPushResult{}, err
 	}
+	// 到账时间以挂机端上报的付款时刻为准，匹配订单时用它的上界约束订单创建时间。
+	eventTime, ok := parseMonitorTimestamp(input.Timestamp)
+	if !ok {
+		return PaymentPushResult{}, fail(CodeInvalidArgument, "时间戳格式错误")
+	}
+	createdBefore := eventTime.Add(s.matchSkew)
 	eventKey := paymentEventKey(input.Type, input.Price, input.Timestamp)
 	result := PaymentPushResult{}
 	err = s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
@@ -179,61 +206,87 @@ func (s *MonitorService) Push(ctx context.Context, input PaymentPushInput) (Paym
 			return nil
 		}
 
-		matched, findErr := s.orders.FindPendingForUpdate(txCtx, paymentType, priceCents)
-		if errors.Is(findErr, port.ErrNotFound) {
-			created, createErr := s.createUnmatchedTransfer(txCtx, eventKey, paymentType, priceCents, now.Unix())
-			if createErr != nil {
-				return createErr
+		matched, findErr := s.orders.FindPendingForUpdate(txCtx, paymentType, priceCents, createdBefore)
+		if findErr == nil {
+			if err := s.markPaid(txCtx, matched, order.StatusPending, eventKey, key, now); err != nil {
+				return err
 			}
-			result.Order = created
+			matched.State = order.StatusPaid
+			matched.PaidAt = now
+			result.Matched = true
+			result.Order = matched
 			return nil
 		}
-		if findErr != nil {
+		if !errors.Is(findErr, port.ErrNotFound) {
 			return wrap(CodeDependency, "查询待支付订单失败", findErr)
 		}
 
-		changed, transitionErr := s.orders.Transition(txCtx, matched.ID, order.StatusPending, order.StatusPaid, now)
-		if transitionErr != nil {
-			return wrap(CodeDependency, "更新订单支付状态失败", transitionErr)
-		}
-		if !changed {
-			return fail(CodeConflict, "订单状态已变化，请重试")
-		}
-		if err := s.priceLocks.ReleaseByOrderID(txCtx, matched.OrderID); err != nil {
-			return wrap(CodeDependency, "释放订单金额失败", err)
-		}
-
-		matched.State = order.StatusPaid
-		matched.PaidAt = now
-		result.Matched = true
-		result.Order = matched
-		if matched.NotifyURL == "" {
+		// 订单可能刚好在同一瞬间被生命周期任务关闭：只要付款时间落在关闭窗口内，就把订单回补为已支付。
+		reopenable, reopenErr := s.orders.FindReopenableForUpdate(
+			txCtx, paymentType, priceCents, createdBefore, eventTime.Add(-closedReopenWindow),
+		)
+		if reopenErr == nil {
+			if err := s.markPaid(txCtx, reopenable, order.StatusClosed, eventKey, key, now); err != nil {
+				return err
+			}
+			reopenable.State = order.StatusPaid
+			reopenable.PaidAt = now
+			result.Matched = true
+			result.Order = reopenable
 			return nil
 		}
+		if !errors.Is(reopenErr, port.ErrNotFound) {
+			return wrap(CodeDependency, "查询可回补订单失败", reopenErr)
+		}
 
-		payload := signedNotificationPayload(matched, key)
-		encoded, marshalErr := json.Marshal(payload)
-		if marshalErr != nil {
-			return wrap(CodeDependency, "编码通知事件失败", marshalErr)
+		created, createErr := s.createUnmatchedTransfer(txCtx, eventKey, paymentType, priceCents, now.Unix())
+		if createErr != nil {
+			return createErr
 		}
-		messageID := digest("notify", eventKey, matched.OrderID)
-		if enqueueErr := s.outbox.Enqueue(txCtx, port.OutboxMessage{
-			ID:            messageID,
-			Topic:         notificationTopic,
-			AggregateID:   matched.OrderID,
-			Payload:       encoded,
-			EventKey:      eventKey,
-			CreatedAt:     now,
-			NextAttemptAt: now,
-		}); enqueueErr != nil && !errors.Is(enqueueErr, port.ErrAlreadyProcessed) {
-			return wrap(CodeDependency, "写入通知事件失败", enqueueErr)
-		}
+		result.Order = created
 		return nil
 	})
 	if err != nil {
 		return PaymentPushResult{}, err
 	}
 	return result, nil
+}
+
+// markPaid 把订单从待支付/已关闭推进到已支付，释放价格锁并按需入队商户通知。
+// 两条匹配路径（正常待支付、关闭后回补）共用同一套状态转换与通知逻辑，避免规则分叉。
+func (s *MonitorService) markPaid(ctx context.Context, value order.Order, from order.Status, eventKey, merchantKey string, now time.Time) error {
+	changed, transitionErr := s.orders.Transition(ctx, value.ID, from, order.StatusPaid, now)
+	if transitionErr != nil {
+		return wrap(CodeDependency, "更新订单支付状态失败", transitionErr)
+	}
+	if !changed {
+		return fail(CodeConflict, "订单状态已变化，请重试")
+	}
+	if err := s.priceLocks.ReleaseByOrderID(ctx, value.OrderID); err != nil {
+		return wrap(CodeDependency, "释放订单金额失败", err)
+	}
+	if value.NotifyURL == "" {
+		return nil
+	}
+
+	payload := signedNotificationPayload(value, merchantKey)
+	encoded, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return wrap(CodeDependency, "编码通知事件失败", marshalErr)
+	}
+	messageID := digest("notify", eventKey, value.OrderID)
+	if enqueueErr := s.outbox.Enqueue(ctx, port.OutboxMessage{
+		ID:            messageID,
+		Topic:         notificationTopic,
+		AggregateID:   value.OrderID,
+		Payload:       encoded,
+		EventKey:      eventKey,
+		CreatedAt:     now,
+		NextAttemptAt: now,
+	}); enqueueErr != nil && !errors.Is(enqueueErr, port.ErrAlreadyProcessed) {
+		return wrap(CodeDependency, "写入通知事件失败", enqueueErr)
+	}
+	return nil
 }
 
 // createUnmatchedTransfer 让无订单转账也遵循公开令牌唯一性约束，并在极低概率冲突时重试。

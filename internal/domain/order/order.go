@@ -43,6 +43,10 @@ func CanTransition(from, to Status) bool {
 		return to == StatusNotifyFailed
 	case StatusNotifyFailed:
 		return to == StatusPaid
+	// 已关闭订单只允许被「真实到账」重新确认为已支付：
+	// 一是管理端人工补单，二是订单关闭瞬间恰好到账的推送（由用例层限定时间窗口）。
+	case StatusClosed:
+		return to == StatusPaid
 	default:
 		return false
 	}

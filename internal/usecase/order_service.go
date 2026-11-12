@@ -140,6 +140,11 @@ func (s *OrderService) Create(ctx context.Context, input CreateOrderInput) (Crea
 	if input.PayID == "" || input.Type == "" || input.Price == "" || input.Sign == "" {
 		return CreateOrderResult{}, fail(CodeInvalidArgument, "参数不完整")
 	}
+	// 落库字段有长度上限（pay_id VARBINARY(255)、param VARCHAR(255)），
+	// 在用例层提前拒绝，避免严格模式下变成 500 依赖错误。
+	if len(input.PayID) > 255 || len(input.Param) > 255 || len(input.Price) > 64 {
+		return CreateOrderResult{}, fail(CodeInvalidArgument, "参数长度超出限制")
+	}
 
 	typeNumber, err := strconv.Atoi(input.Type)
 	if err != nil || !payment.Type(typeNumber).Valid() {
@@ -404,11 +409,17 @@ func (s *OrderService) ReturnURL(ctx context.Context, publicToken string) (Retur
 }
 
 func appendReturnQuery(baseURL, query string) string {
-	separator := "?"
-	if strings.Contains(baseURL, "?") {
-		separator = "&"
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return baseURL + "?" + query
 	}
-	return baseURL + separator + query
+	// 直接拼接 RawQuery 而不是字符串尾部追加，保证签名参数落在 fragment 之前。
+	if parsed.RawQuery == "" {
+		parsed.RawQuery = query
+	} else {
+		parsed.RawQuery = parsed.RawQuery + "&" + query
+	}
+	return parsed.String()
 }
 
 func (s *OrderService) CloseByID(ctx context.Context, id int64) error {
@@ -630,7 +641,8 @@ func (s *OrderService) DeleteLast(ctx context.Context, olderThan time.Duration) 
 
 	var count int64
 	err := s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
-		if err := s.priceLocks.ReleaseBefore(txCtx, cutoff); err != nil {
+		// 先按订单维度释放价格锁，再删除订单：两者使用同一个 cutoff，不会留下孤儿锁。
+		if err := s.priceLocks.ReleaseByOrdersBefore(txCtx, cutoff); err != nil {
 			return wrap(CodeDependency, "批量清理价格锁失败", err)
 		}
 
@@ -639,6 +651,10 @@ func (s *OrderService) DeleteLast(ctx context.Context, olderThan time.Duration) 
 			return wrap(CodeDependency, "批量删除订单失败", err)
 		}
 		count = c
+
+		if err := s.priceLocks.ReleaseOrphaned(txCtx); err != nil {
+			return wrap(CodeDependency, "清理残留价格锁失败", err)
+		}
 		return nil
 	})
 	return count, err
@@ -654,14 +670,10 @@ func (s *OrderService) DeleteExpired(ctx context.Context) (int64, error) {
 		}
 		cutoff := now.Add(-time.Duration(closeMinutes(rawCloseMinutes)) * time.Minute)
 
-		expiredPending, err := s.orders.FindExpiredPendingForUpdate(txCtx, cutoff, 1000)
-		if err != nil {
-			return wrap(CodeDependency, "查询过期订单失败", err)
-		}
-		for _, o := range expiredPending {
-			if err := s.priceLocks.ReleaseByOrderID(txCtx, o.OrderID); err != nil {
-				return wrap(CodeDependency, "级联释放过期订单锁失败", err)
-			}
+		// 释放条件直接挂在 orders 上，且不设批量上限：
+		// 旧实现只给前 500 笔过期订单释放锁，却删除全部过期订单，超出部分会留下永久孤儿锁。
+		if err := s.priceLocks.ReleaseByOrdersBefore(txCtx, cutoff); err != nil {
+			return wrap(CodeDependency, "级联释放过期订单锁失败", err)
 		}
 
 		c, err := s.orders.DeleteExpiredBefore(txCtx, cutoff)
@@ -669,6 +681,10 @@ func (s *OrderService) DeleteExpired(ctx context.Context) (int64, error) {
 			return wrap(CodeDependency, "删除过期订单失败", err)
 		}
 		count = c
+
+		if err := s.priceLocks.ReleaseOrphaned(txCtx); err != nil {
+			return wrap(CodeDependency, "清理残留价格锁失败", err)
+		}
 		return nil
 	})
 	return count, err

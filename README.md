@@ -30,7 +30,7 @@
 | `VMQ_SERVER_PORT` | `8080` | API 服务监听端口 |
 | `VMQ_SERVER_MODE` | `release` | Gin 框架运行模式 (`debug` / `release`) |
 | `VMQ_RUNTIME_MODE` | `writer` | 运行模式。`writer` 模式下会随服务启动后台定时轮询任务（过期处理、Outbox 推送） |
-| `VMQ_FRONTEND_URL` | *必填* | 买家可访问的最终公网 Origin，用于生成收银台链接。单服务同源部署时与对外访问地址一致，结尾不带 `/` |
+| `VMQ_FRONTEND_URL` | *必填* | 买家可访问的最终公网 Origin，用于生成收银台链接。启动时会校验必须是 `http(s)` 绝对地址（缺失或格式错误直接启动失败），结尾不带 `/` |
 | `VMQ_TOKEN_SECRET` | *必填* | 至少 32 位的 JWT 签名密钥（离线生成随机值） |
 | `VMQ_TOKEN_ISSUER` | `vmqfox` | JWT Token 签发者名 |
 | `VMQ_TOKEN_TTL` | `24h` | JWT 凭据有效时长 |
@@ -42,9 +42,14 @@
 | `VMQ_DB_CHARSET` | `utf8mb4` | 字符集 |
 | `VMQ_LIFECYCLE_POLL_INTERVAL`| `10s` | 订单超时关闭扫描周期 |
 | `VMQ_NOTIFICATION_POLL_INTERVAL`| `2s` | Outbox 推送通知扫描周期 |
+| `VMQ_NOTIFICATION_ATTEMPT_TIMEOUT`| `10s` | 单条通知的投递超时，必须小于 `VMQ_NOTIFICATION_LEASE_DURATION` |
+| `VMQ_NOTIFICATION_CONCURRENCY` | `4` | 单个批次内的并发投递数，避免个别慢回调阻塞其他订单 |
+| `VMQ_NOTIFICATION_MAX_ATTEMPTS` | `20` | 单条通知的最大投递次数，超过后转终态并停止重试（订单仍保持已支付） |
+| `VMQ_HISTORY_RETENTION` | `720h` | 到账事件与已完结通知消息的保留时长，超期由生命周期任务清理；`0` 表示不清理 |
 | `VMQ_ALLOWED_ORIGIN` | 空 | 允许跨域访问 API 的精确 Origin 列表（逗号分隔）。留空表示**拒绝所有跨域请求**；同源部署无需配置，且不接受通配符 `*` |
 | `VMQ_MONITOR_HEARTBEAT_TIMEOUT` | `3m` | 超过该时长未收到心跳即判定挂机端离线 |
 | `VMQ_MONITOR_SIGN_TTL` | `5m` | 挂机端心跳/推送签名时间戳的双向允许偏移窗口，超窗按重放拒绝 |
+| `VMQ_MONITOR_MATCH_SKEW` | `1m` | 到账推送匹配订单时容忍的设备时钟偏差（不得大于 `VMQ_MONITOR_SIGN_TTL`）。服务端只匹配「创建时间 ≤ 到账时间 + 本值」的订单 |
 | `VMQ_RATE_LOGIN_LIMIT` / `VMQ_RATE_LOGIN_WINDOW` | `10` / `1m` | 登录端点的每客户端固定窗口额度 |
 | `VMQ_RATE_CREATE_LIMIT` / `VMQ_RATE_CREATE_WINDOW` | `30` / `1m` | 建单端点的每客户端固定窗口额度 |
 | `VMQ_RATE_PUBLIC_READ_LIMIT` / `VMQ_RATE_PUBLIC_READ_WINDOW` | `60` / `1m` | 公开查询、状态和回跳端点的每 IP 固定窗口额度 |
@@ -163,7 +168,7 @@ printf '%s\n' 'YourSecurePassword123' | ./vmqfox-api -init-admin -username admin
 
 ### 6. Windows 下运行（预编译 exe）
 
-Release 包 `vmqfox-backend-V3.0.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`（Intel/AMD）与 `vmqfox-api-windows-arm64.exe`（骁龙等 ARM），纯 Go 编译、零运行时依赖：
+Release 包 `vmqfox-backend-V3.1.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`（Intel/AMD）与 `vmqfox-api-windows-arm64.exe`（骁龙等 ARM），纯 Go 编译、零运行时依赖：
 
 ```powershell
 # 1) 解压后按 CPU 架构选择 exe，重命名为 vmqfox-api.exe，放入独立目录（如 C:\vmqfox）
@@ -200,7 +205,7 @@ Release 包 `vmqfox-backend-V3.0.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`�
   * `POST /api/order/expired` - 批量手动触发关闭已超时的 Pending 订单。
   * `DELETE /api/order/expired` - **删除过期订单**：物理批量删除所有超时未付/已关闭的订单（Pending 级联释锁）。
   * `DELETE /api/order/last` - 物理清理历史归档旧订单（24小时前）。
-  * `POST /api/order/reissue/:id` - **人工补单**：事务内强制改变订单为已支付、释放金额锁并向 Outbox 压入重签通知。
+  * `POST /api/order/reissue/:id` - **人工补单**：事务内把 `Pending`/`Closed`/`NotifyFailed` 订单置为已支付、释放金额锁并向 Outbox 压入重签通知（已支付订单拒绝重复补单）。
 * **系统配置**：
   * `GET /api/config/settings` - 获取系统收款配置、有效期、区分额度方式等。
   * `POST /api/config/settings` (及别名 `POST /api/config/save`) - 保存/更新系统全局配置与管理员密码。
@@ -229,7 +234,8 @@ Release 包 `vmqfox-backend-V3.0.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`�
 所有响应由 `SecurityHeaders` 中间件统一附加 `X-Content-Type-Options`、`Referrer-Policy`、
 `X-Frame-Options`、`Cross-Origin-Opener-Policy` 与 CSP。CSP 的 `script-src` 仅允许同源脚本与携带
 本次请求 nonce 的内联脚本，因此前端入口不含无 nonce 的内联 `<script>`；`isHtml=1` 的支付跳转页
-会自动注入该 nonce。只有请求确实经由 HTTPS 到达时才下发 HSTS，避免强制升级中断仍走 HTTP 的挂机端。
+会自动注入该 nonce。HSTS 只在请求确实经由 HTTPS 到达时下发（直连 TLS，或 TCP 对端位于
+`VMQ_TRUSTED_PROXY_CIDR` 且转发 `X-Forwarded-Proto: https`），避免强制升级中断仍走 HTTP 的挂机端。
 
 跨域遵循默认拒绝：`VMQ_ALLOWED_ORIGIN` 留空时不下发任何 `Access-Control-Allow-Origin`，
 配置值中的 `*` 会被忽略，命中白名单时才回显请求 Origin 并附加 `Vary: Origin`。
@@ -251,6 +257,10 @@ v1 的 MD5 签名已停止受理，仅保留用于识别未升级的旧 SDK 并�
 * 金额一律定标为两位小数，且签名串与请求参数必须使用同一份文本。
 * `notifyUrl` / `returnUrl` 未传时以空串参与签名，且只接受 `http(s)` 协议。
 * 心跳与推送的 `t` 为毫秒 epoch，偏移超出 `VMQ_MONITOR_SIGN_TTL` 即按重放拒绝。
+* **推送的 `t` 必须使用「到账通知产生的时刻」，重试时必须复用首次的 `t` 与原签名**。
+  服务端以该时间作为付款时间：只匹配 `created_at <= t + 1m` 的订单，重试换新时间戳会让同一笔付款被当成新事件。
+* 付款恰好落在订单超时关闭的瞬间时，服务端会在关闭后 10 分钟内把该订单回补为已支付（`Closed → Paid`），
+  不会把真实到账记成「无订单转账」。
 * 三端（Go 服务端、PHP 商户插件 `vmqfox_plugin.php`、安卓挂机端 `MonitorSign.java`）共用同一组黄金向量，
   固化在 `internal/domain/payment/payment_test.go`；前端联调页 `testOrder` 会在界面上自检浏览器端实现是否与该组向量一致。
 * 独立复算方式：
@@ -258,6 +268,15 @@ v1 的 MD5 签名已停止受理，仅保留用于识别未升级的旧 SDK 并�
 ```bash
 printf '%s' 't=1773500000000' | openssl dgst -sha256 -hmac 'testkey123456' -hex
 ```
+
+### 6. 商户回调契约
+
+* 投递方式：`POST` + `application/x-www-form-urlencoded`，参数即上表的回调 canonical 字段与 `sign`。
+* 成功判定：HTTP `2xx`，且响应正文为 `success`（忽略大小写与首尾空白）或空正文。
+  返回其它正文会被视为失败并进入退避重试。
+* 重试策略：指数退避（1m / 2m / 4m …，封顶 32m），最多 `VMQ_NOTIFICATION_MAX_ATTEMPTS` 次；
+  超限后消息转终态停止重试，订单仍保持「已支付 / 通知失败」，不会回退付款事实。
+* 并发投递：同一批次内按 `VMQ_NOTIFICATION_CONCURRENCY` 并发，单个商户回调变慢不会阻塞其他订单。
 
 ---
 

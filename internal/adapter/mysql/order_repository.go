@@ -156,12 +156,26 @@ func (r *OrderRepository) Create(ctx context.Context, value order.Order) (order.
 	return row.ToDomain(), nil
 }
 
-func (r *OrderRepository) FindPendingForUpdate(ctx context.Context, typ payment.Type, reallyPriceCents int64) (order.Order, error) {
+func (r *OrderRepository) FindPendingForUpdate(ctx context.Context, typ payment.Type, reallyPriceCents int64, createdBefore time.Time) (order.Order, error) {
 	var row OrderRow
 	err := databaseFromContext(ctx, r.db).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("payment_type = ? AND state = ? AND really_price_cent = ?", int(typ), int(order.StatusPending), reallyPriceCents).
+		Where("payment_type = ? AND state = ? AND really_price_cent = ? AND created_at <= ?",
+			int(typ), int(order.StatusPending), reallyPriceCents, createdBefore).
 		Order("id ASC").
+		Take(&row).Error
+	return row.ToDomain(), mapDatabaseError(err)
+}
+
+// FindReopenableForUpdate 只回补「付款时间点早于关闭时间点之后一小段时间」的订单，
+// 让关闭与到账的竞态窗口内不丢单，同时不会把很久以前关闭的订单重新打开。
+func (r *OrderRepository) FindReopenableForUpdate(ctx context.Context, typ payment.Type, reallyPriceCents int64, createdBefore, closedAfter time.Time) (order.Order, error) {
+	var row OrderRow
+	err := databaseFromContext(ctx, r.db).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("payment_type = ? AND state = ? AND really_price_cent = ? AND created_at <= ? AND closed_at IS NOT NULL AND closed_at >= ?",
+			int(typ), int(order.StatusClosed), reallyPriceCents, createdBefore, closedAfter).
+		Order("id DESC").
 		Take(&row).Error
 	return row.ToDomain(), mapDatabaseError(err)
 }
@@ -197,8 +211,14 @@ func (r *OrderRepository) Transition(ctx context.Context, id int64, from, to ord
 
 	updates := map[string]any{"state": int(to)}
 	switch {
-	case from == order.StatusPending && to == order.StatusPaid:
+	// 只有「此前未支付」的订单第一次变成已支付时才写入支付时间，
+	// 通知失败后的状态恢复不能覆盖原始付款时间。
+	case (from == order.StatusPending || from == order.StatusClosed) && to == order.StatusPaid:
 		updates["paid_at"] = changedAt
+		if from == order.StatusClosed {
+			// 关闭后被真实到账回补，清除关闭时间，保持「未关闭订单没有 closed_at」的语义。
+			updates["closed_at"] = nil
+		}
 	case to == order.StatusClosed:
 		updates["closed_at"] = changedAt
 	}

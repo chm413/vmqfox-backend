@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -99,11 +100,17 @@ type JobConfig struct {
 	NotificationAttemptTimeout time.Duration
 	NotificationLeaseDuration  time.Duration
 	NotificationBatchSize      int
+	NotificationConcurrency    int
+	NotificationMaxAttempts    int
 	LifecyclePollInterval      time.Duration
 	LifecycleAttemptTimeout    time.Duration
 	LifecycleBatchSize         int
 	MonitorHeartbeatTimeout    time.Duration
 	MonitorSignTTL             time.Duration
+	// MonitorMatchSkew 是到账推送匹配订单时容忍的设备时钟偏差。
+	MonitorMatchSkew time.Duration
+	// HistoryRetention 是到账事件与已完结通知消息的保留时长，0 表示不清理。
+	HistoryRetention time.Duration
 }
 
 func (c RuntimeConfig) CanWrite() bool {
@@ -164,7 +171,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("VMQ_DB_MAX_IDLE_CONNS 配置无效")
 	}
 
-	frontendURL := first([]string{"VMQ_FRONTEND_URL", "APP_FRONTEND_URL"}, "")
+	frontendURL, err := validateFrontendURL(first([]string{"VMQ_FRONTEND_URL", "APP_FRONTEND_URL"}, ""))
+	if err != nil {
+		return Config{}, err
+	}
 	// 未配置允许的跨域来源时保持为空，由 CORS 中间件默认拒绝跨域；
 	// 单服务同源部署本身不需要 CORS，因此不再回退为通配符 "*"。
 	allowedOrigin := first([]string{"VMQ_ALLOWED_ORIGIN"}, frontendURL)
@@ -215,7 +225,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	notificationAttemptTimeout, err := duration("VMQ_NOTIFICATION_ATTEMPT_TIMEOUT", 30*time.Second)
+	notificationAttemptTimeout, err := duration("VMQ_NOTIFICATION_ATTEMPT_TIMEOUT", 10*time.Second)
 	if err != nil {
 		return Config{}, err
 	}
@@ -229,6 +239,18 @@ func Load() (Config, error) {
 	notificationBatchSize, err := integer("VMQ_NOTIFICATION_BATCH_SIZE", 20)
 	if err != nil || notificationBatchSize < 1 || notificationBatchSize > 100 {
 		return Config{}, errors.New("VMQ_NOTIFICATION_BATCH_SIZE 必须在 1 到 100 之间")
+	}
+	notificationConcurrency, err := integer("VMQ_NOTIFICATION_CONCURRENCY", 4)
+	if err != nil || notificationConcurrency < 1 || notificationConcurrency > 100 {
+		return Config{}, errors.New("VMQ_NOTIFICATION_CONCURRENCY 必须在 1 到 100 之间")
+	}
+	notificationMaxAttempts, err := integer("VMQ_NOTIFICATION_MAX_ATTEMPTS", 20)
+	if err != nil || notificationMaxAttempts < 1 || notificationMaxAttempts > 1000 {
+		return Config{}, errors.New("VMQ_NOTIFICATION_MAX_ATTEMPTS 必须在 1 到 1000 之间")
+	}
+	historyRetention, err := optionalDuration("VMQ_HISTORY_RETENTION", 30*24*time.Hour)
+	if err != nil {
+		return Config{}, err
 	}
 	lifecyclePollInterval, err := duration("VMQ_LIFECYCLE_POLL_INTERVAL", 10*time.Second)
 	if err != nil {
@@ -249,6 +271,13 @@ func Load() (Config, error) {
 	monitorSignTTL, err := duration("VMQ_MONITOR_SIGN_TTL", 5*time.Minute)
 	if err != nil {
 		return Config{}, err
+	}
+	monitorMatchSkew, err := duration("VMQ_MONITOR_MATCH_SKEW", time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	if monitorMatchSkew > monitorSignTTL {
+		return Config{}, errors.New("VMQ_MONITOR_MATCH_SKEW 不能大于 VMQ_MONITOR_SIGN_TTL")
 	}
 
 	loginRate, err := rateLimitRule("VMQ_RATE_LOGIN_LIMIT", "VMQ_RATE_LOGIN_WINDOW", 10, time.Minute)
@@ -325,11 +354,15 @@ func Load() (Config, error) {
 			NotificationAttemptTimeout: notificationAttemptTimeout,
 			NotificationLeaseDuration:  notificationLeaseDuration,
 			NotificationBatchSize:      notificationBatchSize,
+			NotificationConcurrency:    notificationConcurrency,
+			NotificationMaxAttempts:    notificationMaxAttempts,
 			LifecyclePollInterval:      lifecyclePollInterval,
 			LifecycleAttemptTimeout:    lifecycleAttemptTimeout,
 			LifecycleBatchSize:         lifecycleBatchSize,
 			MonitorHeartbeatTimeout:    monitorHeartbeatTimeout,
 			MonitorSignTTL:             monitorSignTTL,
+			MonitorMatchSkew:           monitorMatchSkew,
+			HistoryRetention:           historyRetention,
 		},
 		Outbound: OutboundConfig{
 			AllowedCIDRs:      outboundAllowedCIDRs,
@@ -401,6 +434,34 @@ func duration(name string, fallback time.Duration) (time.Duration, error) {
 	}
 	parsed, err := time.ParseDuration(value)
 	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s 配置无效", name)
+	}
+	return parsed, nil
+}
+
+// validateFrontendURL 要求显式配置买家可访问的公网地址。
+// 收银台链接由该地址拼接，缺失时下单响应只能返回空 redirectUrl，
+// 等于把配置错误推迟到商户侧暴露，因此必须在启动期拦下。
+func validateFrontendURL(raw string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return "", errors.New("VMQ_FRONTEND_URL 必须显式配置为买家可访问的公网地址")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", errors.New("VMQ_FRONTEND_URL 必须是 http(s) 绝对地址")
+	}
+	return trimmed, nil
+}
+
+// optionalDuration 允许显式配置 0 来关闭对应能力（例如关闭历史清理）。
+func optionalDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value, ok := lookup(name)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
 		return 0, fmt.Errorf("%s 配置无效", name)
 	}
 	return parsed, nil
