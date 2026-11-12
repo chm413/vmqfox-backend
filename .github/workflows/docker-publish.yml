@@ -1,5 +1,13 @@
 name: Publish Go backend image
 
+# 所有第三方 Action 一律固定到 commit SHA，不用 @v4 这类可变 tag。
+# 可变 tag 允许上游在不改动本文件一行代码的情况下替换实际执行的内容，
+# 而本 workflow 持有 packages:write —— 一旦被投毒即可推送恶意镜像。
+# 行尾注释保留可读的版本号，由 .github/dependabot.yml 的 github-actions
+# 生态自动更新 SHA 与注释；升版本会以 PR 形式出现，可审可测。
+# 手动升级请勿写回 @vX，务必查真实 SHA：
+#   git ls-remote --tags https://github.com/<owner>/<repo> 'v<major>.*'
+
 on:
   workflow_dispatch:
   push:
@@ -23,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       # GHCR 的镜像路径必须全小写，而 github.repository_owner 会保留账号原有大小写，
       # 这里统一转小写，避免出现 "invalid reference format"。
@@ -32,10 +40,10 @@ jobs:
         run: echo "repository=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -43,7 +51,7 @@ jobs:
 
       - name: Calculate image tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5.10.0
         with:
           images: ${{ steps.image.outputs.repository }}
           tags: |
@@ -60,7 +68,7 @@ jobs:
       # 若将来要恢复 arm64：在本行加回 ,linux/arm64 并重新加上 setup-qemu 步骤即可，
       # Dockerfile 已固定 BUILDPLATFORM，前端不会因此被重复构建。
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
         with:
           context: .
           file: Dockerfile

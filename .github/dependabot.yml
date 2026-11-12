@@ -1,0 +1,73 @@
+version: 2
+
+# 依赖自动更新。此前仓库没有任何自动化，本轮供应链审计发现的漏洞
+# （Go 标准库、x/net、x/crypto、mimetype 撤回版本、vite、zod 等）
+# 全靠人工跑工具才能发现，实际结果是从建立起没升过补丁版本。
+#
+# github-actions 生态是这里最关键的一项：它会把 workflow 里固定的
+# commit SHA 与行尾版本注释一起更新，是长期维持 SHA 固定的唯一可行方式。
+# 没有它，手工维护 SHA 会在几轮之后退化回 @vX 可变 tag。
+
+updates:
+  # Go 模块
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+      gorm:
+        patterns:
+          - "gorm.io/*"
+      gin:
+        patterns:
+          - "github.com/gin-gonic/*"
+          - "github.com/gin-contrib/*"
+
+  # 前端依赖（pnpm-lock.yaml）
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-web)"
+    groups:
+      radix:
+        patterns:
+          - "@radix-ui/*"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+
+  # GitHub Actions：更新 SHA 固定与行尾版本注释
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # 容器基础镜像（Dockerfile 中的 node / golang / alpine）
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"

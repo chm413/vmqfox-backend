@@ -1,5 +1,10 @@
 name: Build and release Go backend
 
+# 所有第三方 Action 一律固定到 commit SHA，不用 @v4 这类可变 tag。
+# 本 workflow 持有 contents:write，能改写 Release 附件乃至覆盖已发布的二进制；
+# 可变 tag 一旦被上游替换，攻击者即可向所有下游用户下发带后门的产物。
+# 行尾注释保留可读版本号，由 .github/dependabot.yml 自动维护。
+
 on:
   workflow_dispatch:
     inputs:
@@ -22,22 +27,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
+      # 固定到 v4.3.0 的 SHA：仓库中 @v4 浮动 tag 当前实际指向的正是这个提交，
+      # 冻结在现状不会引入行为变化。最新的 v4.4.0 交给 Dependabot 单独开 PR 升级。
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1  # v4.3.0
         with:
           version: ${{ env.PNPM_VERSION }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -93,7 +100,7 @@ jobs:
 
       # overwrite_files 允许对同一 tag 重复发布时直接替换旧包（如修订 V3.0）
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           tag_name: ${{ inputs.tag_name }}
           overwrite_files: true
