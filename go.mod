@@ -1,6 +1,9 @@
 module github.com/hulisang/vmqfox-backend
 
-go 1.26.5
+// 1.26.11 是多个标准库漏洞的最低修复版本，其中 net/http 的
+// GO-2026-6859（MaxBytesReader 头部竞态导致 HTTP/1 服务端崩溃）要求最高。
+// 降级前先跑 govulncheck，否则会把已修的可达漏洞重新引回来。
+go 1.26.11
 
 require (
 	github.com/gin-gonic/gin v1.12.0
@@ -17,7 +20,7 @@ require (
 	github.com/bytedance/sonic v1.15.2 // indirect
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
 	github.com/gin-contrib/sse v1.1.1 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
@@ -39,10 +42,10 @@ require (
 	github.com/ugorji/go/codec v1.3.2 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.8.0 // indirect
 	golang.org/x/arch v0.30.0 // indirect
-	golang.org/x/crypto v0.54.0
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/term v0.48.0
+	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )

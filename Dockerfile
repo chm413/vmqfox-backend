@@ -50,10 +50,10 @@ RUN set -eu; \
         echo "已校验前端资源: $asset"; \
     done < /tmp/referenced-assets.txt
 
-# 阶段二：Go 1.26.5 builder；仅复制 cmd/internal，历史 PHP 源码不会进入运行镜像。
+# 阶段二：Go 1.26.11 builder；仅复制 cmd/internal，历史 PHP 源码不会进入运行镜像。
 # GOARCH 由 TARGETARCH 决定，因此单个阶段即可产出任意目标架构的产物；
 # 当前只构建 linux/amd64，恢复多架构时无需改动本阶段。
-FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  GO_VERSION: "1.26.5"
+  GO_VERSION: "1.26.11"
   NODE_VERSION: "24"
   PNPM_VERSION: "11.22.0"
   GOFLAGS: "-mod=mod"

@@ -1,6 +1,6 @@
 # V免签 (VMQFox) —— 单用户 Go 语言免签支付网关
 
-![版本](https://img.shields.io/github/v/release/hulisang/vmqfox-backend?label=%E7%89%88%E6%9C%AC&color=brightgreen) ![Go](https://img.shields.io/badge/Go-1.26.5-00ADD8?label=Go) ![纯Go单二进制](https://img.shields.io/badge/%E6%9E%B6%E6%9E%84-%E7%BA%AFGO%E5%8D%95%E4%BA%8C%E8%BF%9B%E5%88%B6-4A7C59) ![构建发布](https://github.com/hulisang/vmqfox-backend/actions/workflows/build-and-release.yml/badge.svg) ![Docker镜像](https://github.com/hulisang/vmqfox-backend/actions/workflows/docker-publish.yml/badge.svg)
+![版本](https://img.shields.io/github/v/release/hulisang/vmqfox-backend?label=%E7%89%88%E6%9C%AC&color=brightgreen) ![Go](https://img.shields.io/badge/Go-1.26.11-00ADD8?label=Go) ![纯Go单二进制](https://img.shields.io/badge/%E6%9E%B6%E6%9E%84-%E7%BA%AFGO%E5%8D%95%E4%BA%8C%E8%BF%9B%E5%88%B6-4A7C59) ![构建发布](https://github.com/hulisang/vmqfox-backend/actions/workflows/build-and-release.yml/badge.svg) ![Docker镜像](https://github.com/hulisang/vmqfox-backend/actions/workflows/docker-publish.yml/badge.svg)
 
 本项目是针对个人开发者的免签支付网关。现已完成**全面重构**，从原 ThinkPHP 8 版本彻底收敛为 **纯 Go 语言版本 (Go-only)**，移除了对 PHP、PHP-FPM、Composer 以及外部 Redis 的任何依赖。
 
@@ -82,7 +82,7 @@ cd ..
 使用 Docker 或 CI 时无需手动执行本步骤：镜像的 `web-builder` 阶段与发布工作流都会从源码重新构建并校验资源完整性。
 
 ### 1. 本地直接编译运行
-确保您已配置 Go 1.26.5 或更高环境。
+确保您已配置 Go 1.26.11 或更高环境。
 
 ```bash
 # 编译可执行程序（前提：已完成上一步的前端构建）
@@ -228,6 +228,7 @@ Release 包 `vmqfox-backend-V3.1.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`�
 * **安卓监控端交互**：
   * `ANY /api/monitor/heart` - 挂机 App 心跳同步，更新 `lastHeart` 时间。
   * `ANY /api/monitor/push` - 挂机 App 匹配通知栏到账信息推送至服务端，自动完成订单核销、释放价格锁并压入 Outbox 异步回调商户。
+  * 监控端 V3.1.3 起（[chm413/vmqApk](https://github.com/chm413/vmqApk)）支持服务端 HTTPS（含自签证书）：监控端配置地址带 `https://` 前缀即走 TLS，默认 http 向下兼容；服务端开启 HSTS/强制 HTTPS 时监控端需升级到此版本并重新配置。
 
 ### 4. 安全响应头与跨域策略
 
