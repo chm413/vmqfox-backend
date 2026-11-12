@@ -56,6 +56,9 @@ jobs:
 
       # Dockerfile 的 web-builder 阶段会从 web/ 源码重新构建前端并校验资源完整性，
       # 因此镜像内嵌入的一定是本次提交的产物，而非本地忽略目录中的旧 static/out。
+      #
+      # 两个构建阶段都固定跑在 BUILDPLATFORM（见 Dockerfile 顶部说明），
+      # 前端因此只构建一次并被两个平台复用；Go 侧靠 GOARCH 原生交叉编译，无需 QEMU。
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -65,3 +68,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 托管 runner 每次都是全新 VM，本地层缓存不跨运行保留，
+          # 用 gha 后端把 BuildKit 的层缓存存到 Actions 缓存里。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

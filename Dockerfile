@@ -1,15 +1,32 @@
+# 构建性能说明（改这两行 FROM 之前请先读完）：
+# 前端与 Go 两个构建阶段都用 --platform=$BUILDPLATFORM 固定跑在构建机本机架构
+# （GitHub Actions 上即 amd64），而不是跟随目标平台。原因：
+#   1. 前端产物是平台无关的静态 index.html + css + js，为 linux/arm64 再跑一遍
+#      得到的文件逐字节相同，纯属浪费；
+#   2. Go 已设 CGO_ENABLED=0，靠 GOOS/GOARCH 原生交叉编译即可产出 arm64 二进制。
+# 若改回跟随目标平台，linux/arm64 那一路会全程跑在 QEMU 模拟下：实测同一条
+# pnpm install 在 amd64 下 7.6 秒完成，在 QEMU 下每条 registry 请求退化到
+# 10~22 秒，并最终触发 esbuild 原生 postinstall 的 SIGILL 崩溃，单这一层耗时
+# 超过 28 分钟。运行时阶段（alpine）仍然跟随目标平台，这是必须的。
+
 # 阶段一：从 web 源码构建 React 静态资源。
 # 构建产物直接落在 internal/http/static/out，供下一阶段的 go:embed 读取，
 # 避免镜像依赖本地未跟踪的旧构建产物。
-FROM node:24-alpine AS web-builder
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web-builder
 
 WORKDIR /web
 
-# 使用仓库锁定的 pnpm 版本，保证 CI 与镜像安装同一套依赖树
-RUN corepack enable && corepack prepare pnpm@11.22.0 --activate
+# 使用仓库锁定的 pnpm 版本，保证 CI 与镜像安装同一套依赖树。
+# corepack 缓存挂载：避免每次构建都重新下载 pnpm 本体。
+RUN --mount=type=cache,target=/root/.cache/node/corepack \
+    corepack enable && corepack prepare pnpm@11.22.0 --activate
 
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+
+# pnpm store 缓存挂载：命中的包不会再走网络。首次构建仍需完整下载，
+# 之后增量构建只拉新增依赖。
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
 
 COPY web/ ./
 RUN pnpm build
@@ -29,20 +46,27 @@ RUN set -eu; \
     done < /tmp/referenced-assets.txt
 
 # 阶段二：Go 1.26.5 builder；仅复制 cmd/internal，历史 PHP 源码不会进入运行镜像。
-FROM golang:1.26.5-alpine AS builder
+# 固定 BUILDPLATFORM 后本阶段只执行一次（BuildKit 会跨平台复用结果），
+# 再通过 GOOS/GOARCH 交叉编译出 amd64 与 arm64 两份产物。
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+# 允许国内环境覆盖：docker build --build-arg GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY=https://proxy.golang.org,direct
+
 ENV CGO_ENABLED=0 \
     GOFLAGS=-mod=mod \
     GOOS=${TARGETOS} \
-    GOARCH=${TARGETARCH}
+    GOARCH=${TARGETARCH} \
+    GOPROXY=${GOPROXY}
 
 WORKDIR /src
 RUN apk add --no-cache ca-certificates git
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
@@ -51,9 +75,12 @@ COPY internal ./internal
 RUN rm -rf internal/http/static/out
 COPY --from=web-builder /internal/http/static/out ./internal/http/static/out
 
-RUN go build -trimpath -ldflags="-s -w" -o /out/vmqfox-api ./cmd/vmqfox-api
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -ldflags="-s -w" -o /out/vmqfox-api ./cmd/vmqfox-api
 
 # 阶段三：精简运行时仍保留 CA、时区和 wget，分别用于 HTTPS 通知、时间处理和健康检查。
+# 注意：本阶段不指定 --platform，跟随目标平台——目标为 arm64 时运行镜像就是 arm64。
 FROM alpine:3.22 AS runtime
 
 ARG TZ=Asia/Shanghai
