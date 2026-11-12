@@ -31,9 +31,6 @@ jobs:
         id: image
         run: echo "repository=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -57,14 +54,17 @@ jobs:
       # Dockerfile 的 web-builder 阶段会从 web/ 源码重新构建前端并校验资源完整性，
       # 因此镜像内嵌入的一定是本次提交的产物，而非本地忽略目录中的旧 static/out。
       #
-      # 两个构建阶段都固定跑在 BUILDPLATFORM（见 Dockerfile 顶部说明），
-      # 前端因此只构建一次并被两个平台复用；Go 侧靠 GOARCH 原生交叉编译，无需 QEMU。
+      # 只构建 linux/amd64。此前同时构建 linux/arm64 时，arm64 那一路必须全程
+      # 运行在 QEMU 模拟下（esbuild 原生 postinstall 会 SIGILL，registry 请求
+      # 退化到 10~20 秒/条），单架构构建可完全避开这条路径，也就不再需要 QEMU。
+      # 若将来要恢复 arm64：在本行加回 ,linux/arm64 并重新加上 setup-qemu 步骤即可，
+      # Dockerfile 已固定 BUILDPLATFORM，前端不会因此被重复构建。
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

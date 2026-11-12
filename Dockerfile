@@ -1,13 +1,18 @@
-# 构建性能说明（改这两行 FROM 之前请先读完）：
-# 前端与 Go 两个构建阶段都用 --platform=$BUILDPLATFORM 固定跑在构建机本机架构
-# （GitHub Actions 上即 amd64），而不是跟随目标平台。原因：
-#   1. 前端产物是平台无关的静态 index.html + css + js，为 linux/arm64 再跑一遍
-#      得到的文件逐字节相同，纯属浪费；
-#   2. Go 已设 CGO_ENABLED=0，靠 GOOS/GOARCH 原生交叉编译即可产出 arm64 二进制。
-# 若改回跟随目标平台，linux/arm64 那一路会全程跑在 QEMU 模拟下：实测同一条
-# pnpm install 在 amd64 下 7.6 秒完成，在 QEMU 下每条 registry 请求退化到
-# 10~22 秒，并最终触发 esbuild 原生 postinstall 的 SIGILL 崩溃，单这一层耗时
-# 超过 28 分钟。运行时阶段（alpine）仍然跟随目标平台，这是必须的。
+# 当前只发布 linux/amd64 镜像（见 docker-publish.yml 的 platforms）。
+#
+# 两个构建阶段仍然用 --platform=$BUILDPLATFORM 固定跑在构建机本机架构，而不是
+# 跟随目标平台。虽然单架构下两者通常是同一个平台，但保留这个固定有两个实际收益：
+#   1. 将来恢复 arm64 时，前端不会被丢进 QEMU 重跑一遍——它的产物是平台无关的
+#      静态 index.html + css + js，跨架构重建得到的文件逐字节相同；
+#   2. 在 Apple Silicon 本机构建 amd64 镜像时走原生交叉编译而非 QEMU 模拟。
+#
+# 历史教训：此前两个阶段都跟随目标平台，构建 linux/amd64 + linux/arm64 时，
+# arm64 那一路全程跑在 QEMU 下，pnpm install 的每条 registry 请求从 amd64 的
+# 毫秒级退化到 10~22 秒，并最终触发 esbuild 原生 postinstall 的 SIGILL 崩溃，
+# 单这一层就跑不完 28 分钟。Go 侧因为已设 CGO_ENABLED=0，用 GOOS/GOARCH 原生
+# 交叉编译即可，从来不需要模拟。
+#
+# 运行时阶段（alpine）不指定 --platform，始终跟随目标平台——这是必须的。
 
 # 阶段一：从 web 源码构建 React 静态资源。
 # 构建产物直接落在 internal/http/static/out，供下一阶段的 go:embed 读取，
@@ -46,8 +51,8 @@ RUN set -eu; \
     done < /tmp/referenced-assets.txt
 
 # 阶段二：Go 1.26.5 builder；仅复制 cmd/internal，历史 PHP 源码不会进入运行镜像。
-# 固定 BUILDPLATFORM 后本阶段只执行一次（BuildKit 会跨平台复用结果），
-# 再通过 GOOS/GOARCH 交叉编译出 amd64 与 arm64 两份产物。
+# GOARCH 由 TARGETARCH 决定，因此单个阶段即可产出任意目标架构的产物；
+# 当前只构建 linux/amd64，恢复多架构时无需改动本阶段。
 FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine AS builder
 
 ARG TARGETOS=linux
