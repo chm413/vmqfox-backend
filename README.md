@@ -209,6 +209,7 @@ Release 包 `vmqfox-backend-V3.1.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`�
 * **系统配置**：
   * `GET /api/config/settings` - 获取系统收款配置、有效期、区分额度方式等。
   * `POST /api/config/settings` (及别名 `POST /api/config/save`) - 保存/更新系统全局配置与管理员密码。
+  * `alipayAccount` 配置项用于填写收款方支付宝账号（手机号或邮箱），与 `zfbpay` 收款码相互独立：前者只影响收银台是否给出转账确认单深链，后者仍是到账核销的凭证来源。留空时收银台退回纯二维码扫码，行为与未引入该配置前完全一致。
   * `GET /api/config/monitor` - 读取当前系统配置的监控心跳状态。
   * `POST /api/config/monitor` - 手动覆盖监控状态参数 `jkstate`（该值是监控端在线状态而非总开关，手动写入会在下次心跳或生命周期任务时被自动纠正，仅为兼容旧客户端保留）。
 
@@ -221,6 +222,8 @@ Release 包 `vmqfox-backend-V3.1.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`�
 * **网关链路**：
   * `POST /api/order/create` - 传入商户单号、金额、类型，验签后自动匹配二维码，占用价格锁；响应中的 `publicToken` 是唯一的匿名收银台凭据。
   * `GET /api/order/get/:publicToken` - 获取前台收银台支付展示参数；只接受 64 位随机公开令牌，响应不包含内部订单号、回调地址或透传参数。
+  * 支付宝订单在配置了 `alipayAccount` 时，上述响应会额外带 `alipayScheme`：支付宝转账确认单深链，形如 `alipays://platformapi/startapp?account=13800138000&actionType=toAccount&amount=1.00&appId=20000116`，金额已按 `reallyPrice` 预填，用户点击后直接进入收款方与金额都已锁定的确认页，无需手输。微信订单该字段为空串。
+  * 深链只是支付便利通道，不参与任何判定。收银台始终并列展示二维码，到账识别仍由挂机端推送 `type` + `price` 后按原金额匹配逻辑核销，支付宝与微信两条链路完全一致。
   * `GET /api/order/check/:publicToken` - 轮询订单状态；只返回状态和剩余时间，不下发回跳地址。
   * `GET /api/order/return-url/:publicToken` - 订单支付成功后才返回服务端生成并签名的回跳地址。
   * `GET /api/qrcode/generate` - 将收款支付链接极速生成为 PNG 图像输出 (`image/png`)。

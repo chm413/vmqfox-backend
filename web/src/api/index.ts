@@ -187,6 +187,8 @@ export interface SystemSettings {
   payQf: string
   wxpay: string
   zfbpay: string
+  /** 收款方支付宝账号，用于生成转账确认单；留空即退回二维码扫码。 */
+  alipayAccount: string
 }
 
 export const settingsApi = {
@@ -217,6 +219,11 @@ export interface PublicOrderInfo {
   timeOut: number
   date: number
   remainingSeconds: number
+  /**
+   * 支付宝转账确认单深度链接（alipays://）。
+   * 为空表示未配置收款账号或非支付宝订单，此时退回二维码扫码。
+   */
+  alipayScheme?: string
 }
 
 export interface CreateOrderResult {

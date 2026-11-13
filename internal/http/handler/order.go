@@ -81,6 +81,9 @@ type PublicOrderView struct {
 	TimeoutMinutes   int    `json:"timeOut"`
 	CreatedAt        int64  `json:"date"`
 	RemainingSeconds int64  `json:"remainingSeconds"`
+	// AlipayScheme 为支付宝转账确认单深度链接；为空表示未配置收款账号或非支付宝订单，
+	// 收银台据此退回二维码扫码。
+	AlipayScheme string `json:"alipayScheme"`
 }
 
 type CreateOrderResponse struct {
@@ -433,6 +436,7 @@ func apiOrderViewData(result usecase.OrderView) PublicOrderView {
 		TimeoutMinutes:   result.TimeoutMinutes,
 		CreatedAt:        value.CreatedAt.Unix(),
 		RemainingSeconds: result.RemainingSeconds,
+		AlipayScheme:     result.AlipayScheme,
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/admin"
 	"github.com/hulisang/vmqfox-backend/internal/domain/setting"
@@ -25,6 +26,9 @@ type UpdateSettingsInput struct {
 	PriceAdjust  string
 	WechatPayURL string
 	AlipayPayURL string
+	// AlipayAccount 是收款方支付宝账号，用于生成转账确认单深度链接。
+	// 允许为空：为空时收银台退回二维码扫码，不影响既有下单与到账匹配。
+	AlipayAccount string
 }
 
 type SettingsServiceDeps struct {
@@ -86,6 +90,13 @@ func (s *SettingsService) Update(ctx context.Context, input UpdateSettingsInput)
 	if input.PriceAdjust != "1" && input.PriceAdjust != "2" {
 		return fail(CodeInvalidArgument, "金额区分方式无效")
 	}
+	alipayAccount := strings.TrimSpace(input.AlipayAccount)
+	if len([]byte(alipayAccount)) > 128 {
+		return fail(CodeInvalidArgument, "支付宝收款账号长度不能超过 128 个字节")
+	}
+	if strings.ContainsAny(alipayAccount, " \t\r\n") {
+		return fail(CodeInvalidArgument, "支付宝收款账号不能包含空白字符")
+	}
 
 	passwordHash := ""
 	if input.Password != "" {
@@ -116,13 +127,14 @@ func (s *SettingsService) Update(ctx context.Context, input UpdateSettingsInput)
 		}
 
 		if err := s.settings.SetMany(txCtx, map[string]string{
-			setting.NotifyURLKey:    input.NotifyURL,
-			setting.ReturnURLKey:    input.ReturnURL,
-			setting.MerchantKey:     input.MerchantKey,
-			setting.CloseMinutesKey: strconv.Itoa(closeMinutes),
-			setting.PriceAdjustKey:  input.PriceAdjust,
-			setting.WechatPayURLKey: input.WechatPayURL,
-			setting.AlipayPayURLKey: input.AlipayPayURL,
+			setting.NotifyURLKey:     input.NotifyURL,
+			setting.ReturnURLKey:     input.ReturnURL,
+			setting.MerchantKey:      input.MerchantKey,
+			setting.CloseMinutesKey:  strconv.Itoa(closeMinutes),
+			setting.PriceAdjustKey:   input.PriceAdjust,
+			setting.WechatPayURLKey:  input.WechatPayURL,
+			setting.AlipayPayURLKey:  input.AlipayPayURL,
+			setting.AlipayAccountKey: alipayAccount,
 		}); err != nil {
 			return wrap(CodeDependency, "更新系统设置失败", err)
 		}

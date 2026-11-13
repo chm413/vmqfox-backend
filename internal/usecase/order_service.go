@@ -47,6 +47,9 @@ type OrderView struct {
 	StateText        string
 	TimeoutMinutes   int
 	RemainingSeconds int64
+	// AlipayScheme 是支付宝转账确认单深度链接；仅当支付方式为支付宝且后台
+	// 配置了收款账号时非空，其余情况为空串，收银台据此退回二维码扫码。
+	AlipayScheme string
 }
 
 type ListOrdersInput struct {
@@ -291,7 +294,23 @@ func (s *OrderService) Get(ctx context.Context, publicToken string) (OrderView, 
 	if err != nil {
 		return OrderView{}, err
 	}
-	return orderView(value, minutes, s.clock.Now()), nil
+	view := orderView(value, minutes, s.clock.Now())
+	view.AlipayScheme = s.alipayTransferScheme(ctx, value)
+	return view, nil
+}
+
+// alipayTransferScheme 生成支付宝转账确认单链接，金额取实付金额（reallyPrice）——
+// 与到账匹配使用的金额保持一致，避免预填金额与实际应付款不符。
+// 任何一步缺失都返回空串，让收银台安静地退回扫码，不向用户暴露配置缺失。
+func (s *OrderService) alipayTransferScheme(ctx context.Context, value order.Order) string {
+	if value.Type != payment.Alipay {
+		return ""
+	}
+	account, err := s.settings.Get(ctx, setting.AlipayAccountKey)
+	if err != nil {
+		return ""
+	}
+	return payment.AlipayTransferScheme(account, order.FormatCents(value.ReallyPriceCents))
 }
 
 // findPublicOrder 统一公开订单令牌校验与查询；格式错误和不存在都返回相同结果，避免形成订单存在性探针。

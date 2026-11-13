@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input'
 import { CopyButton } from '@/components/common/copy-button'
 import { QRCodeView } from '@/components/common/qr-code-view'
 import { decodeQRFromFile } from '@/lib/decode-qr'
-import { Settings, Key, Shield, RefreshCw, Save, QrCode, Upload } from 'lucide-react'
+import { Settings, Key, Shield, RefreshCw, Save, QrCode, Upload, Smartphone } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface FallbackQrFieldProps {
@@ -85,6 +85,7 @@ export const SettingsView: React.FC = () => {
     payQf: '1',
     wxpay: '',
     zfbpay: '',
+    alipayAccount: '',
   })
 
   useEffect(() => {
@@ -99,6 +100,7 @@ export const SettingsView: React.FC = () => {
         payQf: data.payQf || '1',
         wxpay: data.wxpay || '',
         zfbpay: data.zfbpay || '',
+        alipayAccount: data.alipayAccount || '',
       })
     }
   }, [data])
@@ -245,6 +247,32 @@ export const SettingsView: React.FC = () => {
                   value={formData.zfbpay || ''}
                   onChange={(value) => setFormData((prev) => ({ ...prev, zfbpay: value }))}
                 />
+              </div>
+            </div>
+
+            {/* 支付宝转账确认单 */}
+            <div className="pt-4 border-t border-border/60">
+              <div className="text-xs font-semibold text-foreground mb-1 flex items-center gap-1.5">
+                <Smartphone className="size-3.5 text-primary" /> 支付宝转账确认单
+              </div>
+              <p className="text-xs text-muted-foreground mb-3">
+                填写后，支付宝订单的收银台会多一个「打开支付宝付款」按钮：点开直接进入转账界面，
+                金额已预填，只需确认即可完成支付。留空则保持原来的扫码方式，两种方式互不影响。
+              </p>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  支付宝收款账号（手机号或邮箱）
+                </label>
+                <Input
+                  value={formData.alipayAccount || ''}
+                  onChange={(e) =>
+                    setFormData((prev) => ({ ...prev, alipayAccount: e.target.value }))
+                  }
+                  placeholder="例如 13800138000 或 pay@example.com"
+                />
+                <p className="text-xs text-muted-foreground">
+                  必须是能正常收款的支付宝账号；填错会导致跳转后转账页空白。
+                </p>
               </div>
             </div>
 

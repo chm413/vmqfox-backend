@@ -27,6 +27,8 @@ type updateSettingsRequest struct {
 	PayQf     string `json:"payQf" form:"payQf"`
 	Wxpay     string `json:"wxpay" form:"wxpay"`
 	Zfbpay    string `json:"zfbpay" form:"zfbpay"`
+	// AlipayAccount 用于生成支付宝转账确认单深度链接，留空即退回二维码扫码。
+	AlipayAccount string `json:"alipayAccount" form:"alipayAccount"`
 }
 
 func getSettingsHandler(service SettingsManager) gin.HandlerFunc {
@@ -43,19 +45,20 @@ func getSettingsHandler(service SettingsManager) gin.HandlerFunc {
 
 		values := result.Values
 		c.JSON(http.StatusOK, php.NewEnvelope(200, "成功", gin.H{
-			"user":      result.Username,
-			"pass":      "",
-			"notifyUrl": values[setting.NotifyURLKey],
-			"returnUrl": values[setting.ReturnURLKey],
-			"key":       values[setting.MerchantKey],
-			"lastheart": values[setting.LastHeartKey],
-			"lastpay":   values[setting.LastPayKey],
-			"jkstate":   values[setting.MonitorStateKey],
-			"close":     values[setting.CloseMinutesKey],
-			"payQf":     values[setting.PriceAdjustKey],
-			"pay_qf":    values[setting.PriceAdjustKey],
-			"wxpay":     values[setting.WechatPayURLKey],
-			"zfbpay":    values[setting.AlipayPayURLKey],
+			"user":          result.Username,
+			"pass":          "",
+			"notifyUrl":     values[setting.NotifyURLKey],
+			"returnUrl":     values[setting.ReturnURLKey],
+			"key":           values[setting.MerchantKey],
+			"lastheart":     values[setting.LastHeartKey],
+			"lastpay":       values[setting.LastPayKey],
+			"jkstate":       values[setting.MonitorStateKey],
+			"close":         values[setting.CloseMinutesKey],
+			"payQf":         values[setting.PriceAdjustKey],
+			"pay_qf":        values[setting.PriceAdjustKey],
+			"wxpay":         values[setting.WechatPayURLKey],
+			"zfbpay":        values[setting.AlipayPayURLKey],
+			"alipayAccount": values[setting.AlipayAccountKey],
 		}))
 	}
 }
@@ -91,15 +94,16 @@ func updateSettingsHandler(service SettingsManager) gin.HandlerFunc {
 			return
 		}
 		if err := service.Update(c.Request.Context(), usecase.UpdateSettingsInput{
-			Username:     request.User,
-			Password:     request.Pass,
-			NotifyURL:    request.NotifyURL,
-			ReturnURL:    request.ReturnURL,
-			MerchantKey:  request.Key,
-			CloseMinutes: request.Close,
-			PriceAdjust:  request.PayQf,
-			WechatPayURL: request.Wxpay,
-			AlipayPayURL: request.Zfbpay,
+			Username:      request.User,
+			Password:      request.Pass,
+			NotifyURL:     request.NotifyURL,
+			ReturnURL:     request.ReturnURL,
+			MerchantKey:   request.Key,
+			CloseMinutes:  request.Close,
+			PriceAdjust:   request.PayQf,
+			WechatPayURL:  request.Wxpay,
+			AlipayPayURL:  request.Zfbpay,
+			AlipayAccount: request.AlipayAccount,
 		}); err != nil {
 			writeSettingsError(c, err)
 			return

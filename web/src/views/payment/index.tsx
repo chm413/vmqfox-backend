@@ -2,15 +2,24 @@ import React, { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { publicPaymentApi } from '@/api'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
 import { QRCodeView } from '@/components/common/qr-code-view'
-import { Clock, AlertCircle, Smartphone } from 'lucide-react'
+import { Clock, AlertCircle, Smartphone, Wallet } from 'lucide-react'
 
 interface PaymentViewProps {
   publicToken: string
 }
 
+/** 微信内置浏览器会拦截 alipays:// 唤起，必须引导用户改用系统浏览器。 */
+const isWeChatBrowser = () => /MicroMessenger/i.test(navigator.userAgent)
+
+/** 只有移动端才能唤起支付宝 App；桌面端直接给扫码路径，避免点了没反应。 */
+const isMobileDevice = () => /Android|iPhone|iPad|iPod|Windows Phone|Mobile/i.test(navigator.userAgent)
+
 export const PaymentView: React.FC<PaymentViewProps> = ({ publicToken }) => {
   const [remaining, setRemaining] = useState<number | null>(null)
+  // 记录唤起失败：点了按钮但页面仍在前台，说明系统没有接住这个 scheme。
+  const [schemeMissed, setSchemeMissed] = useState(false)
 
   // 1. 获取公开订单详情
   const { data: order, isLoading, error } = useQuery({
@@ -80,6 +89,24 @@ export const PaymentView: React.FC<PaymentViewProps> = ({ publicToken }) => {
   const isAlipay = order.payType === 2
   const payTypeName = isWechat ? '微信' : isAlipay ? '支付宝' : '在线'
 
+  // 转账确认单仅在支付宝订单且后台配置了收款账号时可用；为空时行为与改造前完全一致。
+  const scheme = order.alipayScheme?.trim() || ''
+  const canDeepLink = !!scheme
+  const inWeChat = isWeChatBrowser()
+  const onMobile = isMobileDevice()
+
+  const handleOpenAlipay = () => {
+    if (!scheme) return
+    setSchemeMissed(false)
+    window.location.href = scheme
+    // 唤起成功时页面会切到后台；1.5 秒后仍可见说明没跳成功，给出扫码兜底提示。
+    window.setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        setSchemeMissed(true)
+      }
+    }, 1500)
+  }
+
   const minutes = Math.floor((remaining || 0) / 60)
   const seconds = (remaining || 0) % 60
 
@@ -92,11 +119,13 @@ export const PaymentView: React.FC<PaymentViewProps> = ({ publicToken }) => {
               <Smartphone className="size-5" />
             </div>
             <CardTitle className="text-lg font-bold">
-              {payTypeName} 扫码支付
+              {payTypeName} {canDeepLink ? '付款' : '扫码支付'}
             </CardTitle>
           </div>
           <p className="text-xs text-muted-foreground">
-            请使用 {payTypeName} APP 扫描下方二维码完成支付
+            {canDeepLink
+              ? '点击下方按钮打开支付宝，金额已自动填好，确认转账即可'
+              : `请使用 ${payTypeName} APP 扫描下方二维码完成支付`}
           </p>
         </CardHeader>
 
@@ -114,7 +143,35 @@ export const PaymentView: React.FC<PaymentViewProps> = ({ publicToken }) => {
             )}
           </div>
 
-          {/* 二维码展示区 */}
+          {/* 支付宝转账确认单入口：仅移动端且非微信内置浏览器可用 */}
+          {canDeepLink && (
+            <div className="w-full">
+              {inWeChat ? (
+                <div className="text-xs leading-relaxed text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/25 rounded-2xl px-3 py-2.5">
+                  微信内无法直接打开支付宝。请点右上角 <b>⋯</b> 选择「在浏览器中打开」，
+                  再点付款按钮；也可直接扫描下方二维码。
+                </div>
+              ) : onMobile ? (
+                <div className="space-y-2">
+                  <Button onClick={handleOpenAlipay} className="w-full h-11 text-base font-semibold">
+                    <Wallet className="size-4 mr-2" />
+                    打开支付宝付款 ¥{order.reallyPrice}
+                  </Button>
+                  {schemeMissed && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 text-center">
+                      未能打开支付宝，请确认已安装支付宝 App，或使用下方二维码支付
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-center text-muted-foreground bg-muted/40 border border-border/60 rounded-2xl px-3 py-2.5">
+                  当前为桌面浏览器，一键付款需在手机上打开本页面；也可直接扫码支付
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 二维码展示区：任何情况下都保留，作为一键付款失败时的兜底 */}
           <div className="py-2">
             {order.payUrl ? (
               <QRCodeView
