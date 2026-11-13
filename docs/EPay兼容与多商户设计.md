@@ -12,7 +12,7 @@
 | 项 | 决策 |
 | :-- | :-- |
 | 协议角色 | 本网关**扮演 EPay 平台侧**，对外提供 `submit.php` / `mapi.php` / `api.php` 与 V2 的 `/api/pay/*` |
-| 商户模型 | **多商户**，独立 `pid` + 密钥 + 回调地址，订单按商户隔离 |
+| 商户模型 | **多商户但站内自控**：自增 `id` 直接作 `pid`，只存名称/启停 + 密钥，订单按商户隔离 |
 | 协议版本 | **V1（MD5）与 V2（SHA256WithRSA）同时实现**，按商户配置决定启用哪套 |
 | VMQ 原生接口 | **保留不动**，与 EPay 双协议并存 |
 | 收款码 | 所有商户**共用同一批** `qrcodes`，这是免签系统的物理前提 |
@@ -109,62 +109,63 @@ EPay 回调要求商户返回纯文本 `success`。现有 `notificationSucceeded
 
 ## 2. 数据模型
 
-### 2.1 新增 `merchants`
+### 2.1 新增 `merchants`（极简：自增 ID 即 pid）
+
+商户由站内统一控制、数量有限，不引入独立 `pid` 列、不存回调地址与限额——
+EPay 下单时 `notify_url` / `return_url` 本来就是每次必传，存默认值只会产生「配置与实际不一致」。
 
 ```sql
 CREATE TABLE merchants (
-  id            BIGINT NOT NULL AUTO_INCREMENT,
-  pid           BIGINT NOT NULL,                    -- EPay 的 pid，对外暴露
-  name          VARCHAR(128) NOT NULL,
-  state         TINYINT NOT NULL DEFAULT 1,         -- 1 启用 / 0 停用
-  -- 协议开关：决定这个商户能用哪套接口，可同时开启
-  enable_v1     TINYINT(1) NOT NULL DEFAULT 1,
-  enable_v2     TINYINT(1) NOT NULL DEFAULT 0,
-  -- 回调与限额
-  default_notify_url  TEXT NOT NULL,
-  default_return_url  TEXT NOT NULL,
-  -- 金额策略（见 §3.2）：0 严格等额 / 1 允许微调
-  allow_price_adjust  TINYINT(1) NOT NULL DEFAULT 0,
-  max_amount_cent     BIGINT NOT NULL DEFAULT 0,   -- 0 表示不限制
-  remark              VARCHAR(255) NOT NULL DEFAULT '',
-  created_at    DATETIME(6) NOT NULL,
-  updated_at    DATETIME(6) NOT NULL,
-  PRIMARY KEY (id),
-  UNIQUE KEY uq_merchants_pid (pid)
+  id          BIGINT NOT NULL AUTO_INCREMENT,   -- 自增主键，直接作为 EPay 的 pid 对外暴露
+  name        VARCHAR(64) NOT NULL DEFAULT '',  -- 仅用于后台辨认，可留空
+  enabled     TINYINT(1) NOT NULL DEFAULT 1,
+  created_at  DATETIME(6) NOT NULL,
+  updated_at  DATETIME(6) NOT NULL,
+  PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
-### 2.2 新增 `merchant_keys`（密钥版本化，支撑轮换）
+刻意不设的字段及原因：
+
+| 去掉的字段 | 替代方式 |
+| :-- | :-- |
+| 独立 `pid` 列 + 唯一索引 | `id` 本身就是 pid，少一层映射，也少一处可能写错的地方 |
+| `enable_v1` / `enable_v2` | **协议是否开通由「该协议有没有配密钥」自然决定**，避免出现「开关开着但没密钥」的不一致状态 |
+| `default_notify_url` / `default_return_url` | EPay 下单必传，直接落订单表 |
+| `allow_price_adjust` | 上移为全局设置 `epayPriceAdjust`（见 §3.2），商户级差异化没必要 |
+| `max_amount_cent` / `remark` | 由站内自行把控，不进模型 |
+
+### 2.2 新增 `merchant_keys`（两代制，够轮换且不膨胀）
 
 ```sql
 CREATE TABLE merchant_keys (
-  id            BIGINT NOT NULL AUTO_INCREMENT,
-  merchant_id   BIGINT NOT NULL,
-  protocol      TINYINT NOT NULL,                   -- 1=V1(MD5) 2=V2(RSA)
-  version       INT NOT NULL,                       -- 同一商户同一协议内递增
-  state         TINYINT NOT NULL DEFAULT 1,         -- 1=active(可用于签发) 0=retired(仅验签)
-  -- V1：AES-GCM 密文；V2：平台私钥密文
-  secret_cipher BLOB NOT NULL,
-  secret_nonce  BLOB NOT NULL,
-  -- V2 专用：商户公钥（公钥不敏感，明文存）
+  merchant_id     BIGINT NOT NULL,
+  protocol        TINYINT NOT NULL,                 -- 1=EPayV1(MD5) 2=EPayV2(RSA)
+  generation      TINYINT NOT NULL,                 -- 1=当前（用于签发） 0=上一代（仅验签）
+  -- V1：共享密钥密文；V2：平台私钥密文。均由 AES-256-GCM 加密（见 §4.1）
+  secret_cipher   BLOB NOT NULL,
+  secret_nonce    BLOB NOT NULL,
+  -- V2 专用：商户公钥，公钥不敏感，明文存
   peer_public_key TEXT NOT NULL DEFAULT '',
-  -- 展示用后四位，避免每次都解密
-  hint          VARCHAR(8) NOT NULL DEFAULT '',
-  created_at    DATETIME(6) NOT NULL,
-  retired_at    DATETIME(6) NULL,
-  PRIMARY KEY (id),
-  UNIQUE KEY uq_merchant_keys_version (merchant_id, protocol, version),
-  KEY idx_merchant_keys_lookup (merchant_id, protocol, state)
+  hint            VARCHAR(8) NOT NULL DEFAULT '',   -- 展示用末 4 位，避免每次解密
+  created_at      DATETIME(6) NOT NULL,
+  PRIMARY KEY (merchant_id, protocol, generation)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
 设计要点：
 
-- **多版本共存**：轮换时新建 `version+1` 并置 `active`，旧行转 `retired`。
-  验签时按 `state DESC, version DESC` 遍历全部密钥逐一尝试——轮换窗口期内新旧请求都能通过，
-  签发与回调签名只用 `active` 那条。
-- **密钥不落明文**：`secret_cipher/nonce` 由 AES-256-GCM 加密，主密钥来自环境变量（见 §4.1）。
-- **只展示一次**：明文仅在创建/轮换的响应里返回一次，此后接口只回 `hint`（后 4 位）。
+- **每商户每协议最多两行**。主键 `(merchant_id, protocol, generation)` 天然保证这一点，
+  不需要自增 id、不需要 `version` 递增、不需要 `state` 与 `retired_at`。
+- **轮换 = 一个事务里的三步**：删 `generation=0` → 把 `generation=1` 改成 `0` →
+  插入新的 `generation=1`。旧代立刻降为「仅验签」，新代开始签发。
+- **验签读两行、逐一尝试**，签发与回调签名只用 `generation=1`。
+  轮换窗口期内的在途请求不会失败。
+- **协议开通判定**：`SELECT 1 FROM merchant_keys WHERE merchant_id=? AND protocol=? AND generation=1`。
+  查不到即返回「该商户未开通 V1/V2 接口」，无需额外的布尔开关。
+- 两代制牺牲了「保留三代以上做长期灰度」的能力。对这个场景够用：
+  商户是自己人，轮换可以配合通知一次性完成，不需要无限期并行。
+
 
 ### 2.3 改造 `orders`
 
@@ -190,7 +191,7 @@ ALTER TABLE orders ADD KEY idx_orders_merchant_state (merchant_id, state, create
 
 1. 建 `merchants`、`merchant_keys` 两张新表（无侵入）
 2. `orders` 加列（`DEFAULT` 保证旧行可读）
-3. 把 `settings.key` 迁移为一个 `pid=1` 的 V2 商户？**不迁移**。
+3. 把 `settings.key` 迁移为一个 `id=1` 的 EPay 商户？**不迁移**。
    原生接口继续读 `settings.key`，EPay 商户从 `merchants` 读，两条路径互不干扰。
 4. 最后再加 `(merchant_id, pay_id)` 唯一索引并删除旧索引
 
@@ -220,14 +221,15 @@ ALTER TABLE orders ADD KEY idx_orders_merchant_state (merchant_id, state, create
 | **B 允许微调** | 锁不住就 +0.01~0.99，回调仍回 `money=10.00` | 下单成功率高 | 用户实付 10.03，商户只知 10.00，差额需人工对账 |
 | C 回调回真实金额 | 回调 `money=10.03` | 账面一致 | **商户金额校验失败，发货中断，不可用** |
 
-**默认 A**，按商户开启 B（`merchants.allow_price_adjust`）。
+**默认 A**，通过全局设置 `epayPriceAdjust=1` 开启 B。
 
 方案 B 的关键约束：**回调签名域只能使用 EPay 标准字段**，`money` 必须回下单金额。
 不能塞 `really_money` 之类自定义字段——MD5 验签是对「全部非空参数」排序拼接，
 多一个字段商户侧必然验签失败。真实金额只落本地 `orders.really_price_cent`，供管理端对账。
 
-> 这意味着 `settings.payQf`（现有全局微调配置）对 EPay 通道**默认不生效**，
-> 必须由商户级别的 `allow_price_adjust` 显式开启。原生 VMQ 通道保持原行为。
+> `settings.payQf`（现有全局微调配置）对 EPay 通道**默认不生效**，
+> 由新增的全局设置 `epayPriceAdjust` 显式开启，原生 VMQ 通道保持原行为。
+> 做成全局而非商户级：商户都在站内自控，不同商户用不同金额策略只会让对账口径更难解释。
 
 ### 3.3 挂机端与协议无关
 
@@ -284,17 +286,30 @@ EPay V2 是**双向签名**：
 
 生成：RSA 2048，PKCS#8 PEM。2048 位是 EPay 生态的通行值，4096 在部分老 PHP 环境验签会超时。
 
-### 4.4 轮换流程
+### 4.4 轮换流程（两代制）
 
-```
-1. 管理端「轮换密钥」→ 生成 version+1，state=active
-2. 旧 version 置 state=retired（不删）
-3. 商户把新密钥填进自己的面板（V1 直接替换；V2 换平台公钥）
-4. 观察 7 天，期间新旧密钥并行验签
-5. 确认无流量后，手动清理 retired 行
+在一个事务里完成三步，天然不会出现「同一商户同一协议超过两代」：
+
+```sql
+-- 1) 丢弃更早的一代
+DELETE FROM merchant_keys
+ WHERE merchant_id = ? AND protocol = ? AND generation = 0;
+-- 2) 当前代降级为「仅验签」
+UPDATE merchant_keys SET generation = 0
+ WHERE merchant_id = ? AND protocol = ? AND generation = 1;
+-- 3) 写入新一代
+INSERT INTO merchant_keys
+  (merchant_id, protocol, generation, secret_cipher, secret_nonce, peer_public_key, hint, created_at)
+VALUES (?, ?, 1, ?, ?, ?, ?, NOW(6));
 ```
 
-不做自动清理：停用太早会让仍在用旧密钥的商户突然全部失败，且日志里只会看到"签名错误"。
+之后：
+
+1. 旧代立刻只用于验签，新代负责签发与回调签名，**在途请求不受影响**
+2. 商户把新密钥填进自己的面板（V1 直接替换；V2 换成新的平台公钥）
+3. 下次轮换时第 1 步会自然清掉旧代，**不需要单独的清理任务**
+
+不做自动过期：停用太早会让仍在用旧密钥的商户突然全部失败，日志里只会看到「签名错误」。
 
 ---
 
@@ -319,7 +334,7 @@ GET      /api/merchant/list
 POST     /api/merchant/create
 POST     /api/merchant/update/:id
 POST     /api/merchant/key/rotate/:id
-GET      /api/merchant/key/reveal/:id    # 仅创建后 10 分钟内可读一次明文
+# 明文密钥只在 create / rotate 的响应里返回一次，之后只回末 4 位 hint，不设单独的解密端点
 ```
 
 `submit.php` / `mapi.php` 必须挂在根路径而非 `/api` 下——大量 EPay 插件把
@@ -431,20 +446,30 @@ GET {merchant.notify_url}?pid=1001&trade_no=20261113000001&out_trade_no=M2026111
 
 ### 6.3 与现有 Outbox 的衔接
 
-`notification_outbox` 现有字段已够用，但消息体需要携带协议上下文：
+**签名在入队时固化，投递时不再查密钥。**
+
+支付成功的事务里就把完整回调请求生成好（URL + 参数 + sign），整体作为 payload 存入 outbox：
 
 ```go
 type epayNotifyPayload struct {
-    Protocol   int    // 1=V1 2=V2
-    MerchantID int64
-    KeyVersion int    // 落库时快照，避免回调时用了轮换后的新密钥
-    // ...EPay 标准字段
+    Protocol int    // 1=EPayV1 2=EPayV2（仅用于日志与 topic 归类）
+    Method   string // V1 固定 GET；V2 固定 POST
+    URL      string // V1 为拼好参数后的完整地址；V2 为裸地址
+    Body     string // V2 的 form 编码正文；V1 为空
 }
 ```
 
-**`KeyVersion` 必须在下单/支付成功时就快照进消息体**。否则：商户轮换密钥后，
-一条还没来得及投递的旧订单回调会用新密钥签名，商户按旧密钥验签必然失败。
-这是密钥轮换最容易踩的坑。
+投递 worker 原样发出，**不读 `merchant_keys`、不解密主密钥**。
+
+为什么不用「快照密钥版本」：
+
+1. **两代制下版本号不可靠**。轮换时 `generation=1` 会被改写成 `0`，新密钥占据 `1`。
+   消息里快照的 `1` 在轮换后指向的是新密钥，签名依然会错——快照反而制造了错误的确定性。
+2. **签名值本身不敏感**，它就是要发给商户的。落 payload 没有额外泄露面。
+3. 投递路径与商户表彻底解耦，worker 不需要 `MerchantRepository`，故障面更小。
+
+副作用是：密钥轮换、甚至旧代被删除之后，已入队的消息仍能按当时的签名投递成功。
+这正是期望行为——订单发生时的密钥状态就该锁定，而不是跟着配置漂移。
 
 `topic` 区分 `epay.v1.notify` / `epay.v2.notify`，便于按协议观察投递健康度。
 
@@ -513,10 +538,10 @@ P1 之前不要动 `orders` 表结构——先把协议层用纯函数测通，�
 
 | 风险 | 影响 | 应对 |
 | :-- | :-- | :-- |
-| 多商户共享金额空间 | 同额并发下单会失败 | 产品说明写明；提供 `allow_price_adjust` 开关；管理端展示「金额冲突率」指标 |
+| 多商户共享金额空间 | 同额并发下单会失败 | 产品说明写明；提供全局 `epayPriceAdjust` 开关；管理端展示「金额冲突率」指标 |
 | 微调导致商户对账差 | 实收比订单多 0~0.99 元 | 默认关闭；开启时管理端订单详情并列展示 `price` 与 `reallyPrice` |
 | V2 密钥配置门槛高 | 个人用户填不明白 RSA 公钥 | 管理端提供「一键生成平台密钥对 + 复制公钥」；V2 默认关闭，V1 默认开启 |
-| 密钥轮换窗口期漏签 | 旧订单回调用新密钥 | 消息体快照 `KeyVersion`（§6.3） |
+| 密钥轮换窗口期漏签 | 旧订单回调用新密钥 | 签名在入队时固化，投递不再读密钥（§6.3） |
 | 主密钥丢失 | 所有商户密钥不可解密 | 文档强调备份；提供 `vmqfox-api -rotate-master-key` 子命令 |
 | 多商户弱化单商户假设 | 现有 `singleton_guard` 逻辑与新表并存 | 管理员仍唯一（管后台），商户是业务维度，两者不冲突 |
 
@@ -527,21 +552,19 @@ P1 之前不要动 `orders` 表结构——先把协议层用纯函数测通，�
 ### 已确认（2026-11-13）
 
 - **角色**：本网关扮演 EPay 平台侧，站点填「网关 / PID / 密钥」三格即可接入。
-- **商户模型**：多商户，独立 pid + 密钥 + 回调地址。
+- **商户模型**：多商户，但**商户全部由站内自控**，因此模型极简——
+  自增 `id` 直接作为 `pid`，不设独立 pid 列、不存默认回调地址与限额、协议开关由密钥是否存在推导。
 - **协议版本**：EPay 官方 V1（MD5）与官方 V2（SHA256WithRSA）**都实现**。
   V2 门槛较高（站点需支持 RSA 插件），按 §8 排在 P3，V1 优先跑通并可独立上线。
 
 ### 仍需你拍板
 
-1. **金额策略默认值**：我按「默认严格等额、商户可开微调」设计（§3.2 方案 A）。
+1. **金额策略默认值**：我按「默认严格等额、全局开关 `epayPriceAdjust` 才允许微调」设计（§3.2 方案 A）。
    如果你预期并发量高、宁可让用户多付几分也要保证下单成功率，应改为默认开微调。
 
-2. **`pid` 的形态**：EPay 生态里 `pid` 普遍是数字（如 `1001`）。
-   本设计用 `BIGINT`。如果你希望用可读的字符串 ID（如 `vmq_abc123`），需要改成 `VARCHAR(32)`，
-   并调整部分插件的兼容性预期。
-
-3. **V2 的平台密钥粒度**：本文按「每个商户一把平台密钥对」设计（隔离性好，但商户换平台要重配）。
-   另一种是全局一把平台密钥对（配置简单，但任一商户泄露会影响全部）。当前选前者。
+2. **V2 的平台密钥粒度**：本文按「每个商户一把平台密钥对」设计（隔离性好，但商户换平台要重配）。
+   既然商户都由你控制、数量不多，改成**全局一把平台密钥对**会更省事——
+   代价是任一商户泄露会影响全部。当前仍选前者，如需简化可改。
 
 ---
 
