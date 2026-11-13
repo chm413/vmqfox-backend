@@ -168,7 +168,7 @@ printf '%s\n' 'YourSecurePassword123' | ./vmqfox-api -init-admin -username admin
 
 ### 6. Windows 下运行（预编译 exe）
 
-Release 包 `vmqfox-backend-V3.1.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`（Intel/AMD）与 `vmqfox-api-windows-arm64.exe`（骁龙等 ARM），纯 Go 编译、零运行时依赖：
+Release 包 `vmqfox-backend-V3.2.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`（Intel/AMD）与 `vmqfox-api-windows-arm64.exe`（骁龙等 ARM），纯 Go 编译、零运行时依赖：
 
 ```powershell
 # 1) 解压后按 CPU 架构选择 exe，重命名为 vmqfox-api.exe，放入独立目录（如 C:\vmqfox）
