@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/admin"
+	"github.com/hulisang/vmqfox-backend/internal/domain/merchant"
 	"github.com/hulisang/vmqfox-backend/internal/domain/order"
 	"github.com/hulisang/vmqfox-backend/internal/domain/payment"
 	"github.com/hulisang/vmqfox-backend/internal/domain/qrcode"
@@ -200,4 +201,30 @@ type NotificationResult struct {
 
 type Notifier interface {
 	Send(ctx context.Context, notification Notification) (NotificationResult, error)
+}
+
+// MerchantRepository 承载 EPay 多商户的商户主体（对内 id、对外 merchant_no）。
+// 密钥不在本接口内：协议是否开通由 MerchantKeyRepository 有无当前代密钥自然决定。
+type MerchantRepository interface {
+	Create(ctx context.Context, value merchant.Merchant) (merchant.Merchant, error)
+	FindByID(ctx context.Context, id int64) (merchant.Merchant, error)
+	FindByNo(ctx context.Context, no string) (merchant.Merchant, error)
+	List(ctx context.Context) ([]merchant.Merchant, error)
+	Update(ctx context.Context, value merchant.Merchant) error
+	Delete(ctx context.Context, id int64) error
+	Count(ctx context.Context) (int64, error)
+}
+
+// MerchantKeyRepository 按「两代制」维护每商户每协议最多两行密钥：
+// generation=1 用于签发与回调签名，generation=0 仅用于验签。
+type MerchantKeyRepository interface {
+	// FindActive 只取当前代；未命中返回 ErrNotFound（等价于该协议未开通）。
+	FindActive(ctx context.Context, merchantID int64, protocol merchant.Protocol) (merchant.Key, error)
+	// FindAllForVerify 返回当前代与上一代（当前代在前），供验签逐一尝试。
+	// V2 必须用每行自己的 peer_public_key 验签，不能统一用当前代公钥。
+	FindAllForVerify(ctx context.Context, merchantID int64, protocol merchant.Protocol) ([]merchant.Key, error)
+	Upsert(ctx context.Context, value merchant.Key) error
+	// Rotate 在一个事务里删上一代、把当前代降级为上一代、写入新当前代。
+	Rotate(ctx context.Context, merchantID int64, protocol merchant.Protocol, next merchant.Key) error
+	DeleteByMerchant(ctx context.Context, merchantID int64) error
 }

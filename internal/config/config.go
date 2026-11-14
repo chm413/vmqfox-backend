@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -28,6 +29,23 @@ type Config struct {
 	Jobs      JobConfig
 	Outbound  OutboundConfig
 	RateLimit RateLimitConfig
+	MasterKey MasterKeyConfig
+}
+
+// MasterKeyConfig 是 AES-256-GCM 主密钥集合。
+//
+// Keys 以主密钥版本号为键：写入密文时用 WriteVersion，读取时按密文行内的 key_version 选键，
+// 而不是「试哪把能解开」——后者在配错主密钥时会静默掩盖问题。
+// 未配置时 Keys 为 nil 且 WriteVersion 为 0，服务正常启动（存量部署零感知）；
+// 真正的硬失败点在「第一次创建商户 / 轮换 / EPay 下单」时由用例层拒绝。
+type MasterKeyConfig struct {
+	Keys         map[int][]byte
+	WriteVersion int
+}
+
+// Enabled 表示主密钥是否已配置；未配置时所有加解密调用都必须拒绝，不许退化为明文。
+func (c MasterKeyConfig) Enabled() bool {
+	return len(c.Keys) > 0
 }
 
 type OutboundConfig struct {
@@ -319,6 +337,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	masterKey, err := loadMasterKey()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Server: ServerConfig{
 			Host:              first([]string{"VMQ_SERVER_HOST"}, "0.0.0.0"),
@@ -380,7 +403,72 @@ func Load() (Config, error) {
 			TrustedCIDRs: trustedProxyCIDRs,
 			TrustedIPs:   trustedProxyIPs,
 		},
+		MasterKey: masterKey,
 	}, nil
+}
+
+// masterKeyBytes 是 AES-256 的固定密钥长度；短于此长度的密钥不允许进入生产。
+const masterKeyBytes = 32
+
+// loadMasterKey 解析主密钥配置。
+//
+// 宽松策略（设计文档 §4.1）：四个变量都为空时不报错，存量部署升级零感知；
+// 但只要填了 VMQ_MASTER_KEY，就必须完全合法——配错的主密钥比缺失更危险，
+// 因为它照样能启动，之后所有解密失败而 hint 字段看起来一切正常。
+func loadMasterKey() (MasterKeyConfig, error) {
+	raw, configured := lookup("VMQ_MASTER_KEY")
+	if !configured || strings.TrimSpace(raw) == "" {
+		return MasterKeyConfig{}, nil
+	}
+
+	current, err := decodeMasterKey("VMQ_MASTER_KEY", raw)
+	if err != nil {
+		return MasterKeyConfig{}, err
+	}
+
+	writeVersion, err := integer("VMQ_MASTER_KEY_VERSION", 1)
+	if err != nil || writeVersion <= 0 {
+		return MasterKeyConfig{}, errors.New("VMQ_MASTER_KEY_VERSION 必须是大于 0 的整数")
+	}
+
+	keys := map[int][]byte{writeVersion: current}
+
+	oldRaw, oldConfigured := lookup("VMQ_MASTER_KEY_OLD")
+	if oldConfigured && strings.TrimSpace(oldRaw) != "" {
+		old, err := decodeMasterKey("VMQ_MASTER_KEY_OLD", oldRaw)
+		if err != nil {
+			return MasterKeyConfig{}, err
+		}
+		// 默认旧键版本为「当前版本 - 1」，符合一次只轮换一档的运维习惯。
+		oldVersion, err := integer("VMQ_MASTER_KEY_OLD_VERSION", writeVersion-1)
+		if err != nil || oldVersion <= 0 {
+			// 当前版本为 1 时不存在「上一版」，此时只填 VMQ_MASTER_KEY_OLD 是配置矛盾，
+			// 报错必须点明成因与出路，否则运维只会看到「版本号必须是正整数」而无从下手。
+			return MasterKeyConfig{}, fmt.Errorf(
+				"VMQ_MASTER_KEY_OLD_VERSION 必须是大于 0 的整数（未显式配置时默认取当前版本-1=%d；"+
+					"当前版本为 1 表示尚未轮换过，请勿配置 VMQ_MASTER_KEY_OLD，或显式指定旧键的版本号）",
+				writeVersion-1)
+		}
+		if oldVersion == writeVersion {
+			// 新旧版本相同会让密文的 key_version 失去区分能力，重加密任务将无法收敛。
+			return MasterKeyConfig{}, errors.New("VMQ_MASTER_KEY_OLD_VERSION 不能与 VMQ_MASTER_KEY_VERSION 相同")
+		}
+		keys[oldVersion] = old
+	}
+
+	return MasterKeyConfig{Keys: keys, WriteVersion: writeVersion}, nil
+}
+
+// decodeMasterKey 只接受标准 base64 且解码后必须正好 32 字节。
+func decodeMasterKey(name, raw string) ([]byte, error) {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%s 必须是合法的 base64（可用 `openssl rand -base64 32` 生成）", name)
+	}
+	if len(decoded) != masterKeyBytes {
+		return nil, fmt.Errorf("%s 解码后必须正好 %d 字节，实际 %d 字节", name, masterKeyBytes, len(decoded))
+	}
+	return decoded, nil
 }
 
 func lookup(names ...string) (string, bool) {

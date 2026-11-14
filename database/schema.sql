@@ -96,6 +96,40 @@ CREATE TABLE notification_outbox (
   KEY idx_outbox_claim (status, next_attempt_at, locked_until, created_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 商户主体：内部 id 不对外，对外只暴露 merchant_no；订单有效期按商户独立配置。
+-- merchant_no 是对外 pid，用 ascii_bin 精确匹配：库默认 utf8mb4_unicode_ci 下
+-- 'M7K...' 与 'm7k...' 会命中同一行，对外标识不允许这种模糊。
+CREATE TABLE merchants (
+  id            BIGINT NOT NULL AUTO_INCREMENT,
+  merchant_no   CHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  name          VARCHAR(64) NOT NULL DEFAULT '',
+  enabled       TINYINT(1) NOT NULL DEFAULT 1,
+  close_minutes INT NOT NULL DEFAULT 30,
+  note          VARCHAR(255) NOT NULL DEFAULT '',
+  created_at    DATETIME(6) NOT NULL,
+  updated_at    DATETIME(6) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_merchants_no (merchant_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 商户密钥：两代制，每商户每协议最多两行（generation=1 当前，0 仅验签）。
+-- 协议是否开通由「是否存在 generation=1 的行」决定，不额外设开关。
+CREATE TABLE merchant_keys (
+  merchant_id     BIGINT NOT NULL,
+  protocol        TINYINT NOT NULL,
+  generation      TINYINT NOT NULL,
+  key_version     SMALLINT NOT NULL DEFAULT 1,
+  secret_cipher   BLOB NOT NULL,
+  secret_nonce    BLOB NOT NULL,
+  -- 不能用 TEXT：MySQL 5.7 禁止 TEXT/BLOB 带 DEFAULT（ERROR 1101），而本仓库固定 mysql:5.7。
+  -- PKIX PEM 长度：RSA-2048 ≈451 字节、RSA-4096 ≈800 字节，VARCHAR(1024) 足够且可保留默认值。
+  peer_public_key VARCHAR(1024) NOT NULL DEFAULT '',
+  hint            VARCHAR(16) NOT NULL DEFAULT '',
+  last_used_at    DATETIME(6) NULL,
+  created_at      DATETIME(6) NOT NULL,
+  PRIMARY KEY (merchant_id, protocol, generation)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 管理员凭据不提供默认值。部署者必须在启用服务前写入 id=1 的账号和 bcrypt 哈希；
 -- 应用启动时不会创建、修改或补全该记录。
 -- 示例结构：INSERT INTO admin_credentials

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,9 +31,14 @@ import (
 
 const maxPasswordInputBytes = 74
 
+// masterKeyBytes 与 AES-256 的密钥长度一致，必须与 config 包的主密钥校验保持一致。
+const masterKeyBytes = 32
+
 func main() {
 	hashPassword := flag.Bool("hash-password", false, "从标准输入读取明文密码并输出它的 bcrypt 加密哈希后退出")
 	initDB := flag.Bool("init-db", false, "初始化数据库表结构（执行建表与初始配置）")
+	migrate := flag.Bool("migrate", false, "按序执行 database/migrations 下尚未应用的迁移（幂等，可重复执行）后退出")
+	genMasterKey := flag.Bool("gen-master-key", false, "生成 AES-256-GCM 主密钥（base64）并打印配置说明后退出")
 	migratePublicTokens := flag.Bool("migrate-public-tokens", false, "为订单补齐 public_token 并创建唯一约束")
 	initAdmin := flag.Bool("init-admin", false, "初始化或重置管理员账号与密码（自动检测并建表，支持交互式密文输入）")
 	resetAdmin := flag.Bool("reset-admin", false, "初始化或重置管理员账号与密码（-init-admin 的别名）")
@@ -51,6 +58,22 @@ func main() {
 	if *migratePublicTokens {
 		if err := runPublicTokenMigration(); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ public_token 迁移失败: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if *migrate {
+		if err := runMigrate(); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ 数据库迁移失败: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if *genMasterKey {
+		if err := runGenerateMasterKey(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ 生成主密钥失败: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -216,6 +239,62 @@ func runInitDB() error {
 		return fmt.Errorf("初始化数据库表结构失败: %w", err)
 	}
 	fmt.Println("✅ 数据库表结构初始化成功！")
+	return nil
+}
+
+// runMigrate 只依赖数据库配置（不需要 TOKEN_SECRET 等运行期配置），
+// 因此可以作为一个纯粹的运维步骤在任何时候重复执行。
+func runMigrate() error {
+	database, err := config.LoadDatabase()
+	if err != nil {
+		return fmt.Errorf("加载数据库配置失败: %w", err)
+	}
+	dsn := mysql.DSN(
+		database.User,
+		database.Password,
+		database.Host,
+		database.Port,
+		database.Name,
+		map[string]string{"charset": database.Charset},
+	)
+	db, err := mysql.Open(dsn, database.MaxOpenConns, database.MaxIdleConns, database.ConnMaxLifetime)
+	if err != nil {
+		return fmt.Errorf("数据库连接失败: %w", err)
+	}
+	defer func() { _ = closeDatabase(db) }()
+
+	fmt.Println("🚚 正在执行数据库迁移...")
+	applied, err := mysql.Migrate(db)
+	if err != nil {
+		return err
+	}
+	if applied == 0 {
+		// 明确说明「命令生效了，只是没有待应用的脚本」，避免运维误以为命令没跑起来。
+		fmt.Println("✅ 无待应用迁移（schema_migrations 已是最新）。")
+		return nil
+	}
+	fmt.Printf("✅ 数据库迁移完成，本次应用 %d 条迁移。\n", applied)
+	return nil
+}
+
+// runGenerateMasterKey 只使用本地随机源，不连接数据库，可在部署机上裸跑。
+// 主密钥一旦丢失等于全部商户密钥不可解密，因此提示必须强调与数据库备份分开保存。
+func runGenerateMasterKey(out io.Writer) error {
+	key := make([]byte, masterKeyBytes)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("读取随机源失败: %w", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(key)
+
+	fmt.Fprintln(out, "🔑 已生成 AES-256-GCM 主密钥（32 字节，base64）：")
+	fmt.Fprintln(out, encoded)
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "请写入部署环境变量后重启服务：")
+	fmt.Fprintf(out, "  VMQ_MASTER_KEY=%s\n", encoded)
+	fmt.Fprintln(out, "  VMQ_MASTER_KEY_VERSION=1")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "⚠ 该密钥必须与数据库备份分开保存：两者同时泄露等于商户密钥全部泄露，")
+	fmt.Fprintln(out, "  而密钥丢失则全部商户密钥不可解密，只能重置全部商户密钥。")
 	return nil
 }
 

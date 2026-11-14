@@ -22,6 +22,14 @@ services:
       VMQ_TOKEN_SECRET: ${VMQ_TOKEN_SECRET:?VMQ_TOKEN_SECRET must be set}
       VMQ_TOKEN_ISSUER: ${VMQ_TOKEN_ISSUER:?VMQ_TOKEN_ISSUER must be set}
       VMQ_TOKEN_TTL: ${VMQ_TOKEN_TTL:?VMQ_TOKEN_TTL must be set}
+      # AES-256-GCM 主密钥（base64 的 32 字节），用于加密 merchant_keys 里的商户密钥。
+      # 留空时服务正常启动，但创建 EPay 商户 / 轮换密钥会被拒绝；
+      # 生成命令：vmqfox-api -gen-master-key 或 openssl rand -base64 32。
+      VMQ_MASTER_KEY: ${VMQ_MASTER_KEY:-}
+      VMQ_MASTER_KEY_OLD: ${VMQ_MASTER_KEY_OLD:-}
+      VMQ_MASTER_KEY_VERSION: ${VMQ_MASTER_KEY_VERSION:-1}
+      # 留空时默认取「当前版本 - 1」；只有旧键版本号不是这个值时才需要显式指定。
+      VMQ_MASTER_KEY_OLD_VERSION: ${VMQ_MASTER_KEY_OLD_VERSION:-}
       VMQ_DB_HOST: ${VMQ_DB_HOST:-mysql}
       VMQ_DB_PORT: ${VMQ_DB_PORT:-3306}
       VMQ_DB_NAME: ${VMQ_DB_NAME:-vmq}
