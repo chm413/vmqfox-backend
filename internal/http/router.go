@@ -162,6 +162,21 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	if h.QRCodes.DeleteAlipayAPI == nil {
 		h.QRCodes.DeleteAlipayAPI = h.APIError
 	}
+	if h.Merchant.ListAPI == nil {
+		h.Merchant.ListAPI = h.APIError
+	}
+	if h.Merchant.CreateAPI == nil {
+		h.Merchant.CreateAPI = h.APIError
+	}
+	if h.Merchant.UpdateAPI == nil {
+		h.Merchant.UpdateAPI = h.APIError
+	}
+	if h.Merchant.RotateKeyAPI == nil {
+		h.Merchant.RotateKeyAPI = h.APIError
+	}
+	if h.Merchant.PublicKeyAPI == nil {
+		h.Merchant.PublicKeyAPI = h.APIError
+	}
 
 	r.GET("/health", h.Health)
 	r.GET("/ready", h.Ready)
@@ -253,6 +268,14 @@ func registerAPI(r *gin.Engine, h handler.Handlers, deps RouterDeps) {
 	management.POST("/config/save", h.UpdateSettings)
 	management.POST("/config/monitor", h.UpdateMonitor)
 
+	// EPay 多商户：商户由运营者在管理端手工创建，不开放自助注册。
+	// 密钥明文只在创建/轮换的响应里出现一次，列表与更新接口一律不返回。
+	management.GET("/merchant/list", h.Merchant.ListAPI)
+	management.POST("/merchant/create", h.Merchant.CreateAPI)
+	management.POST("/merchant/update/:id", h.Merchant.UpdateAPI)
+	management.POST("/merchant/key/rotate/:id", h.Merchant.RotateKeyAPI)
+	management.GET("/merchant/key/public/:id", h.Merchant.PublicKeyAPI)
+
 	// 公开支付端点只接受高熵 token；内部 order_id 仅保留在已鉴权管理端路由中。
 	public := api.Group("")
 	public.Any("/order/create",
@@ -280,6 +303,20 @@ func registerAPI(r *gin.Engine, h handler.Handlers, deps RouterDeps) {
 		h.QRCodes.GenerateAPI,
 	)
 	management.POST("/order/close/:id", h.Orders.CloseAPI)
+
+	// EPay V1 兼容入口：站点上只填网关地址 + pid + key 即可接入，
+	// 因此路径必须是根级的 submit.php / mapi.php / api.php，不能挂在 /api 下。
+	// 未装配 EPay 用例时（例如只跑原生渠道的部署）不注册，避免出现空指针入口。
+	if h.EPayV1 != nil {
+		epayCreateLimit := middleware.NewIPRateLimit(deps.RateLimit.Create, deps.RateLimit.TrustedCIDRs, deps.RateLimit.TrustedIPs)
+		writeGuard := middleware.WriteGuardAlways(deps.RuntimeMode)
+		r.Any("/submit.php", epayCreateLimit, writeGuard, h.EPayV1.Submit)
+		r.POST("/mapi.php", epayCreateLimit, writeGuard, h.EPayV1.MAPI)
+		r.Any("/api.php",
+			middleware.NewIPRateLimit(deps.RateLimit.PublicRead, deps.RateLimit.TrustedCIDRs, deps.RateLimit.TrustedIPs),
+			h.EPayV1.API,
+		)
+	}
 
 }
 

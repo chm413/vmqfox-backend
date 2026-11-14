@@ -9,7 +9,6 @@ import (
 const (
 	testMerchantID = int64(9007199254740993) // 超过 2^53，用来钉住 AAD 里 merchantID 必须是完整 8 字节
 	testProtocol   = int8(1)
-	testGeneration = int8(1)
 	testPurpose    = "epay.v1.key"
 )
 
@@ -31,7 +30,7 @@ func mustBox(t *testing.T, keys map[int][]byte, writeVersion int) *Box {
 }
 
 func testAAD() []byte {
-	return AAD(testMerchantID, testProtocol, testGeneration, testPurpose)
+	return AAD(testMerchantID, testProtocol, testPurpose)
 }
 
 func TestSealOpenRoundTrip(t *testing.T) {
@@ -96,11 +95,10 @@ func TestOpenWithWrongAAD(t *testing.T) {
 	}
 
 	cases := map[string][]byte{
-		"换商户":    AAD(testMerchantID+1, testProtocol, testGeneration, testPurpose),
-		"换协议":    AAD(testMerchantID, 2, testGeneration, testPurpose),
-		"换代":     AAD(testMerchantID, testProtocol, 0, testPurpose),
-		"换用途":    AAD(testMerchantID, testProtocol, testGeneration, "epay.v2.private"),
-		"空 AAD":  nil,
+		"换商户":   AAD(testMerchantID+1, testProtocol, testPurpose),
+		"换协议":   AAD(testMerchantID, 2, testPurpose),
+		"换用途":   AAD(testMerchantID, testProtocol, "epay.v2.private"),
+		"空 AAD": nil,
 		"截断 AAD": testAAD()[1:],
 	}
 
@@ -278,21 +276,22 @@ func TestNilBox(t *testing.T) {
 }
 
 // TestAADLayout 钉死 AAD 的字节布局：它是持久化契约，改动会让所有存量密文解不开。
+// 布局刻意不含 generation——轮换只改 generation 而不重加密密文，绑进去就等于让旧代密文自动失效。
 func TestAADLayout(t *testing.T) {
-	aad := AAD(testMerchantID, 2, 0, "epay.v2.private")
+	aad := AAD(testMerchantID, 2, "epay.v2.private")
 
-	const fixedLen = 8 + 1 + 1 + 1 + 1 + 1
+	const fixedLen = 8 + 1 + 1 + 1
 	if len(aad) != fixedLen+len("epay.v2.private") {
 		t.Fatalf("AAD 长度应为 %d，实际 %d", fixedLen+len("epay.v2.private"), len(aad))
 	}
 	if want := []byte{0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}; !bytes.Equal(aad[:8], want) {
 		t.Fatalf("merchantID 应大端写在最前 8 字节\n实际: % x\n期望: % x", aad[:8], want)
 	}
-	if aad[8] != 0x00 || aad[9] != 2 || aad[10] != 0x00 || aad[11] != 0 || aad[12] != 0x00 {
-		t.Fatalf("分隔符/字段布局不符: % x", aad[8:13])
+	if aad[8] != 0x00 || aad[9] != 2 || aad[10] != 0x00 {
+		t.Fatalf("分隔符/协议字段布局不符: % x", aad[8:11])
 	}
-	if string(aad[13:]) != "epay.v2.private" {
-		t.Fatalf("purpose 应为 ASCII 原文，实际 %q", aad[13:])
+	if string(aad[11:]) != "epay.v2.private" {
+		t.Fatalf("purpose 应为 ASCII 原文，实际 %q", aad[11:])
 	}
 }
 

@@ -114,6 +114,15 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 	if err != nil {
 		return nil, err
 	}
+	merchantService, err := usecase.NewMerchantService(usecase.MerchantServiceDeps{
+		Merchants: merchantRepo,
+		Keys:      merchantKeyRepo,
+		Secrets:   masterKeys,
+		Now:       clock.Now,
+	})
+	if err != nil {
+		return nil, err
+	}
 	orderService, err := usecase.NewOrderService(usecase.OrderServiceDeps{
 		Transactions: transactions,
 		Orders:       orders,
@@ -125,6 +134,25 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 		OrderIDs:     system.OrderIDGenerator{},
 		PublicTokens: publicTokens,
 		FrontendURL:  cfg.Server.FrontendURL,
+		// EPay 订单的同步回跳要按商户签名；原生订单不读这三项，缺失不影响既有链路。
+		Merchants:    merchantRepo,
+		MerchantKeys: merchantKeyRepo,
+		MasterKeys:   masterKeys,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// EPay 下单用例：三个入口（submit.php/mapi.php/api.php）共用，
+	// 金额与二维码选择复用 OrderService 的内部逻辑，不另起一套资金路径。
+	epayService, err := usecase.NewEPayService(usecase.EPayServiceDeps{
+		Orders:       orderService,
+		Merchants:    merchantRepo,
+		MerchantKeys: merchantKeyRepo,
+		MasterKeys:   masterKeys,
+		NotifyURLs: httpclient.NotifyURLPolicy{
+			AllowHTTP:    cfg.Outbound.AllowInsecureHTTP,
+			AllowedCIDRs: cfg.Outbound.AllowedCIDRs,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -140,6 +168,10 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 		PublicTokens: publicTokens,
 		SignTTL:      cfg.Jobs.MonitorSignTTL,
 		MatchSkew:    cfg.Jobs.MonitorMatchSkew,
+		// EPay 订单到账后要按商户协议生成回调载荷；原生订单不读这三项。
+		Merchants:    merchantRepo,
+		MerchantKeys: merchantKeyRepo,
+		MasterKeys:   masterKeys,
 	})
 	if err != nil {
 		return nil, err
@@ -154,6 +186,9 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 			Notifier:     httpclient.NewNotifier(nil, cfg.Outbound),
 			Clock:        clock,
 			MaxAttempts:  cfg.Jobs.NotificationMaxAttempts,
+			// V2 回调的 timestamp 有时效，必须在投递时重签；原生与 V1 仍用入队时的固化签名。
+			MerchantKeys: merchantKeyRepo,
+			MasterKeys:   masterKeys,
 		})
 		if serviceErr != nil {
 			return nil, serviceErr
@@ -203,6 +238,8 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 		QRCodeImages: qrImageService,
 		TokenParser:  tokenParser,
 		Status:       status,
+		Merchants:    merchantService,
+		EPay:         epayService,
 	})
 	engine := transport.NewRouter(transport.RouterDeps{
 		Handlers:    handlers,

@@ -101,8 +101,10 @@ type Key struct {
 	CreatedAt  time.Time
 }
 
-// AAD 返回该行密文的附加认证数据，保证密文不能被跨行复用。
+// AAD 返回该行密文的附加认证数据，保证密文不能被跨商户或跨协议复用。
+// 刻意不含 generation：轮换会把 generation 1→0 而密文原样保留，
+// 绑定 generation 会让旧代密文在降级的瞬间失效，两代制里的「上一代仅用于验签」随之报废。
 // 放在这里而不是让调用方手拼，是为了让「protocol/purpose 传错」只有一个写法。
 func (k Key) AAD() []byte {
-	return secret.AAD(k.MerchantID, int8(k.Protocol), k.Generation, k.Protocol.Purpose())
+	return secret.AAD(k.MerchantID, int8(k.Protocol), k.Protocol.Purpose())
 }

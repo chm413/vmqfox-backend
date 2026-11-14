@@ -46,8 +46,12 @@ type Dependencies struct {
 	Monitor      MonitorManager
 	QRCodes      QRCodeManager
 	QRCodeImages QRCodeImageManager
-	TokenParser  TokenParser
-	Status       StatusProvider
+	// Merchants 是 EPay 多商户的管理端用例；为 nil 时相关路由明确返回服务不可用。
+	Merchants MerchantManager
+	// EPay 是 EPay V1 协议的三个入口用例；为 nil 时不注册对应路由。
+	EPay        EPayManager
+	TokenParser TokenParser
+	Status      StatusProvider
 }
 
 type Handlers struct {
@@ -67,6 +71,9 @@ type Handlers struct {
 	Orders         OrderHandlers
 	Monitor        MonitorHandlers
 	QRCodes        QRCodeHandlers
+	Merchant       MerchantHandlers
+	// EPayV1 为 nil 时路由层不注册 /submit.php、/mapi.php、/api.php。
+	EPayV1         *EPayV1Handler
 	APIError       gin.HandlerFunc
 }
 
@@ -93,8 +100,19 @@ func New(deps Dependencies) Handlers {
 		Orders:         newOrderHandlers(deps.Orders),
 		Monitor:        newMonitorHandlers(deps.Monitor),
 		QRCodes:        newQRCodeHandlers(deps.QRCodeImages, deps.QRCodes),
+		Merchant:       newMerchantHandlers(deps.Merchants),
+		EPayV1:         newEPayV1Handler(deps.EPay),
 		APIError:       Unimplemented(),
 	}
+}
+
+// newEPayV1Handler 在未装配 EPay 用例时返回 nil，由路由层决定是否注册入口，
+// 避免出现"路由在、但一调用就空指针"的半装配状态。
+func newEPayV1Handler(epay EPayManager) *EPayV1Handler {
+	if epay == nil {
+		return nil
+	}
+	return NewEPayV1Handler(epay)
 }
 
 func healthHandler(status StatusProvider) gin.HandlerFunc {

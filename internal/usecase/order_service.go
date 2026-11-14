@@ -4,16 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/hulisang/vmqfox-backend/internal/domain/epay"
+	"github.com/hulisang/vmqfox-backend/internal/domain/merchant"
 	"github.com/hulisang/vmqfox-backend/internal/domain/order"
 	"github.com/hulisang/vmqfox-backend/internal/domain/payment"
 	"github.com/hulisang/vmqfox-backend/internal/domain/qrcode"
+	"github.com/hulisang/vmqfox-backend/internal/domain/secret"
 	"github.com/hulisang/vmqfox-backend/internal/domain/setting"
 	"github.com/hulisang/vmqfox-backend/internal/port"
 )
@@ -92,6 +94,11 @@ type OrderServiceDeps struct {
 	Clock        port.Clock
 	OrderIDs     port.OrderIDGenerator
 	PublicTokens port.PublicTokenGenerator
+	// Merchants / MerchantKeys / MasterKeys 只服务 EPay 订单的同步回跳签名
+	// （protocol=1 用商户 V1 密钥，protocol=2 用商户平台私钥）。原生回跳不碰它们。
+	Merchants    port.MerchantRepository
+	MerchantKeys port.MerchantKeyRepository
+	MasterKeys   *secret.Box
 	FrontendURL  string
 }
 
@@ -105,6 +112,9 @@ type OrderService struct {
 	clock        port.Clock
 	orderIDs     port.OrderIDGenerator
 	publicTokens port.PublicTokenGenerator
+	merchants    port.MerchantRepository
+	merchantKeys port.MerchantKeyRepository
+	masterKeys   *secret.Box
 	frontendURL  string
 }
 
@@ -123,6 +133,9 @@ func NewOrderService(deps OrderServiceDeps) (*OrderService, error) {
 		clock:        deps.Clock,
 		orderIDs:     deps.OrderIDs,
 		publicTokens: deps.PublicTokens,
+		merchants:    deps.Merchants,
+		merchantKeys: deps.MerchantKeys,
+		masterKeys:   deps.MasterKeys,
 		frontendURL:  strings.TrimRight(deps.FrontendURL, "/"),
 	}, nil
 }
@@ -405,6 +418,18 @@ func (s *OrderService) ReturnURL(ctx context.Context, publicToken string) (Retur
 	if value.State != order.StatusPaid && value.State != order.StatusNotifyFailed {
 		return ReturnURLResult{}, fail(CodeInvalidState, "订单尚未支付，无法生成回跳签名")
 	}
+
+	switch value.Protocol {
+	case merchant.ProtocolEPayV1, merchant.ProtocolEPayV2:
+		// EPay 订单必须按商户协议签名：拿 settings.key 签原生字段，商户验签必然失败，
+		// 用户付了钱却被回跳到「支付失败」页（设计 §6.4）。
+		signed, signErr := s.epayReturnURL(ctx, value)
+		if signErr != nil {
+			return ReturnURLResult{}, signErr
+		}
+		return ReturnURLResult{ReturnURL: signed}, nil
+	}
+
 	merchantKey, err := s.settings.Get(ctx, setting.MerchantKey)
 	if errors.Is(err, port.ErrNotFound) || merchantKey == "" {
 		return ReturnURLResult{}, fail(CodeConfiguration, "系统未配置密钥")
@@ -426,6 +451,43 @@ func (s *OrderService) ReturnURL(ctx context.Context, publicToken string) (Retur
 
 	// 回跳签名已嵌入 URL 查询参数，匿名接口不再重复暴露独立签名字段。
 	return ReturnURLResult{ReturnURL: newURL}, nil
+}
+
+// epayReturnURL 生成 EPay 订单的同步回跳地址。
+// 字段构造与回调共用 epayNotifyFields，避免「回调验签通过、回跳验签失败」两套逻辑漂移。
+func (s *OrderService) epayReturnURL(ctx context.Context, value order.Order) (string, error) {
+	merchantNo, err := merchantNoFor(ctx, s.merchants, value.MerchantID)
+	if err != nil {
+		return "", wrap(CodeConfiguration, "生成 EPay 回跳地址失败", err)
+	}
+	fields, fieldErr := epayNotifyFields(value, merchantNo)
+	if fieldErr != nil {
+		return "", wrap(CodeConfiguration, "生成 EPay 回跳地址失败", fieldErr)
+	}
+
+	if value.Protocol == merchant.ProtocolEPayV2 {
+		privatePEM, keyErr := merchantV2PrivateKey(ctx, s.merchantKeys, s.masterKeys, value.MerchantID)
+		if keyErr != nil {
+			return "", wrap(CodeConfiguration, "生成 EPay V2 回跳签名失败", keyErr)
+		}
+		signed := cloneEPayFields(fields)
+		epay.AppendTimestamp(signed, s.clock.Now())
+		sign, signErr := epay.SignV2(signed, privatePEM)
+		if signErr != nil {
+			return "", wrap(CodeConfiguration, "生成 EPay V2 回跳签名失败", signErr)
+		}
+		return appendReturnQuery(value.ReturnURL, encodeEPayForm(signed, sign, "RSA")), nil
+	}
+
+	secretText, keyErr := merchantV1Secret(ctx, s.merchantKeys, s.masterKeys, value.MerchantID)
+	if keyErr != nil {
+		return "", wrap(CodeConfiguration, "生成 EPay V1 回跳签名失败", keyErr)
+	}
+	sign, signErr := epay.SignV1(fields, secretText)
+	if signErr != nil {
+		return "", wrap(CodeConfiguration, "生成 EPay V1 回跳签名失败", signErr)
+	}
+	return appendReturnQuery(value.ReturnURL, encodeEPayForm(fields, sign, "MD5")), nil
 }
 
 func appendReturnQuery(baseURL, query string) string {
@@ -731,7 +793,13 @@ func (s *OrderService) ReissueByID(ctx context.Context, id int64) error {
 		return fail(CodeInvalidArgument, "订单ID无效")
 	}
 	now := s.clock.Now()
-	return s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
+	// 载荷生成失败不能作为事务错误返回：补单确认的是「这笔钱确实到账」，
+	// 签名材料不可用只是「通知发不出去」，把它变成回滚等于让管理端补的单凭空消失（设计 §6.6）。
+	var (
+		reissued     order.Order
+		buildFailure error
+	)
+	err := s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
 		value, err := s.orders.FindByIDForUpdate(txCtx, id)
 		if errors.Is(err, port.ErrNotFound) {
 			return fail(CodeNotFound, "订单不存在")
@@ -766,28 +834,29 @@ func (s *OrderService) ReissueByID(ctx context.Context, id int64) error {
 			return nil
 		}
 
-		key, err := s.settings.Get(txCtx, setting.MerchantKey)
-		if errors.Is(err, port.ErrNotFound) || key == "" {
-			return fail(CodeConfiguration, "系统密钥未设置")
-		}
-		if err != nil {
-			return wrap(CodeDependency, "读取系统密钥失败", err)
+		// 原生订单才需要全局密钥；EPay 订单用商户自己的密钥，缺失时由构造器判失败。
+		nativeKey := ""
+		if value.Protocol == merchant.ProtocolNative {
+			nativeKey, err = s.settings.Get(txCtx, setting.MerchantKey)
+			if err != nil && !errors.Is(err, port.ErrNotFound) {
+				return wrap(CodeDependency, "读取系统密钥失败", err)
+			}
 		}
 
-		payload := reissueNotificationPayload(value, key)
-		encoded, marshalErr := json.Marshal(payload)
-		if marshalErr != nil {
-			return wrap(CodeDependency, "编码通知事件失败", marshalErr)
+		// 重签必须按 protocol 选签名器，否则 EPay 订单会被原生 HMAC 报文投给商户。
+		topic, payload, buildErr := buildNotificationFor(txCtx, value, nativeKey, s.merchants, s.merchantKeys, s.masterKeys, now)
+		if buildErr != nil {
+			reissued, buildFailure = value, wrap(CodeConfiguration, "生成回调签名失败", buildErr)
+			return nil
 		}
 
 		eventKey := reissueEventKey(value.OrderID, now)
 		messageID := reissueDigest("notify", eventKey, value.OrderID)
-
 		if enqueueErr := s.outbox.Enqueue(txCtx, port.OutboxMessage{
 			ID:            messageID,
-			Topic:         notificationTopic,
+			Topic:         topic,
 			AggregateID:   value.OrderID,
-			Payload:       encoded,
+			Payload:       payload,
 			EventKey:      eventKey,
 			CreatedAt:     now,
 			NextAttemptAt: now,
@@ -796,34 +865,19 @@ func (s *OrderService) ReissueByID(ctx context.Context, id int64) error {
 		}
 		return nil
 	})
-}
-
-func reissueNotificationPayload(value order.Order, merchantKey string) NotificationPayload {
-	typeText := strconv.Itoa(int(value.Type))
-	price := amountText(value.PriceText, value.PriceCents)
-	reallyPrice := amountText(value.ReallyPriceText, value.ReallyPriceCents)
-
-	newValues := url.Values{
-		"payId":       []string{value.PayID},
-		"param":       []string{value.Param},
-		"type":        []string{typeText},
-		"price":       []string{price},
-		"reallyPrice": []string{reallyPrice},
+	if err != nil {
+		return err
 	}
-	newValues.Set("sign", payment.CallbackSignV2(
-		value.PayID,
-		value.Param,
-		typeText,
-		price,
-		reallyPrice,
-		merchantKey,
-	))
-
-	return NotificationPayload{
-		OrderID:   value.OrderID,
-		NotifyURL: value.NotifyURL,
-		NewForm:   newValues.Encode(),
+	if buildFailure != nil {
+		// 补单事实已提交：只降级通知状态并留待重签记录，然后把配置错误如实报给管理端。
+		recorder := notifyFailureRecorder{transactions: s.transactions, orders: s.orders, outbox: s.outbox}
+		eventKey := reissueEventKey(reissued.OrderID, now)
+		if degradeErr := recorder.record(ctx, reissued, eventKey, buildFailure, now); degradeErr != nil {
+			return degradeErr
+		}
+		return buildFailure
 	}
+	return nil
 }
 
 func reissueEventKey(orderID string, now time.Time) string {

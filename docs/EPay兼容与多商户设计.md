@@ -434,11 +434,13 @@ VMQ_MASTER_KEY = base64(32 bytes)   # AES-256-GCM 主密钥
   而 `hint` 照常显示，界面看起来一切正常。因此启动时做**指纹自检**：
   库中存 `master_key_fingerprint = HMAC-SHA256(master_key, "vmqfox/master-key-check/v1")[:8]`，
   不一致直接拒绝启动并提示「主密钥与数据库不匹配，请恢复原主密钥或重置全部商户密钥」。
-- **AAD 绑定（v3.4 补）**：`Seal/Open` 必须带附加认证数据
-  `merchant_id ‖ 0x00 ‖ protocol ‖ 0x00 ‖ generation ‖ 0x00 ‖ purpose`，
-  `purpose` 取 `epay.v1.key` / `epay.v2.private`。
+- **AAD 绑定（v3.4 补，v3.5 修正）**：`Seal/Open` 必须带附加认证数据
+  `merchant_id ‖ 0x00 ‖ protocol ‖ 0x00 ‖ purpose`，`purpose` 取 `epay.v1.key` / `epay.v2.private`。
   否则仓库查询漏了 `protocol` 条件时，会把 V2 平台私钥密文当 V1 共享密钥解开（GCM 会成功），
   然后拿一段 PEM 当 MD5 key 用，签名永远对不上、日志只显示「签名错误」。
+  **AAD 里不能包含 `generation`**：轮换时 `generation=1` 会被 UPDATE 成 0，而密文不变，
+  一旦 AAD 绑了 generation，旧代密文立刻认证失败——「上一代仅用于验签」会退化成「上一代一律解不开」，
+  且日志只显示签名错误。generation 不属于安全边界（两代都是同一商户同一协议），不该进 AAD。
 - **nonce**：每次 `Seal` 用 `crypto/rand` 取 12 字节随机数并与密文一起存（`secret_nonce`）；
   **禁止**任何确定性派生；`rand.Read` 失败必须返回错误，不许退化为零 nonce。
 - **`key_version`**：密文行记录加密时使用的主密钥版本；解密时按版本选 key。

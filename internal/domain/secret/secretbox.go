@@ -130,17 +130,22 @@ func (b *Box) aead(version int) (cipher.AEAD, error) {
 }
 
 // AAD 拼出附加认证数据，把密文钉死在「哪一行」上：
-// merchantID ‖ 0x00 ‖ protocol ‖ 0x00 ‖ generation ‖ 0x00 ‖ purpose。
+// merchantID ‖ 0x00 ‖ protocol ‖ 0x00 ‖ purpose。
+//
+// 刻意不含 generation：轮换只把 generation 从 1 改成 0，密文原样保留，
+// AAD 一旦绑定 generation，降级后的旧密文立刻认证失败，「上一代仅用于验签」
+// 就退化成「上一代一律解不开」，而对外只表现为「签名错误」，排查方向全错。
+// generation 也不是安全边界——两代同属一个商户、一个协议。
 //
 // 没有 AAD 时，仓库查询漏掉 protocol 条件会把 V2 平台私钥密文当 V1 共享密钥解开
 // （GCM 本身不会报错），然后拿一段 PEM 当 MD5 key 用，签名永远对不上，
 // 而日志只显示「签名错误」——这类排查成本极高的故障必须在密码学层就变成解密失败。
 //
-// protocol/generation 按单字节写入（int8 负值取补码）；purpose 为 ASCII，不可含 0x00。
-func AAD(merchantID int64, protocol int8, generation int8, purpose string) []byte {
-	buf := make([]byte, 0, 8+1+1+1+1+1+len(purpose))
+// protocol 按单字节写入（int8 负值取补码）；purpose 为 ASCII，不可含 0x00。
+func AAD(merchantID int64, protocol int8, purpose string) []byte {
+	buf := make([]byte, 0, 8+1+1+1+len(purpose))
 	buf = binary.BigEndian.AppendUint64(buf, uint64(merchantID))
-	buf = append(buf, 0x00, byte(protocol), 0x00, byte(generation), 0x00)
+	buf = append(buf, 0x00, byte(protocol), 0x00)
 	return append(buf, purpose...)
 }
 

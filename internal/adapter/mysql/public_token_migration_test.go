@@ -67,12 +67,13 @@ func hexToken(seed int) string {
 	return fmt.Sprintf("%064x", seed)
 }
 
-// openTestDatabase 只在显式提供测试库 DSN 时运行迁移集成测试，避免误连生产库。
+// openTestDatabase 只在显式提供测试库 DSN 时运行集成测试，避免误连生产库。
+// 该 helper 已被订单商户维度等用例复用，跳过文案保持通用，避免把排查方向引向单一模块。
 func openTestDatabase(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := strings.TrimSpace(os.Getenv("VMQ_TEST_MYSQL_DSN"))
 	if dsn == "" {
-		t.Skip("未设置 VMQ_TEST_MYSQL_DSN，跳过 public_token 迁移集成测试")
+		t.Skip("未设置 VMQ_TEST_MYSQL_DSN，跳过 MySQL 集成用例")
 	}
 	db, err := Open(dsn, 4, 2, time.Minute)
 	if err != nil {

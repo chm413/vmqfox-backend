@@ -1,0 +1,90 @@
+name: MySQL integration tests
+
+# 为什么单独一个 workflow，而不是挂在 build-and-release.yml 里：
+# 发布流是 workflow_dispatch（还要填 tag_name），把 DB 用例放进去等于「只有人工发版时才跑」，
+# 假绿只是从 CI 挪到了发版流程。这里挂 pull_request + push(main)，才真正起到合并门禁作用；
+# 同时发布 job 持有 contents:write，不该和跑外部依赖的代码共用身份（本文件权限降到 read）。
+#
+# 靶子必须是 mysql:5.7，不许换成 8：002/003 迁移的整套幂等设计（Go 侧探测列是否存在、
+# 合并成单条 ALTER）正是因为 5.7 既没有 ADD COLUMN IF NOT EXISTS 也没有 INSTANT DDL 才存在。
+# 换 8 会用它更强的原子 DDL 把 5.7 上的真实失败掩盖掉——用错靶子验收比不验收更危险。
+# 5.7 与 docker-compose.yml:85 的部署版本一致。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # 保留手动触发，便于排查历史提交或临时复跑，无需推新 commit。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一 ref 连推时取消排队中的旧运行：迁移用例会 DROP/ALTER orders，
+# 让过期提交的红/绿结论覆盖最新提交会误导人。
+concurrency:
+  group: mysql-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 必须与 build-and-release.yml 的 GO_VERSION 保持一致：两边跑的是同一份代码，
+  # 工具链漂移会让「发版能编、门禁不能编」这类问题变得难以复现。
+  GO_VERSION: "1.26.11"
+
+jobs:
+  mysql-integration:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # 卡死保护：数据库用例若等待锁/连接不复位，默认会占用 runner 上限数小时。
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          # 显式声明 root 允许非 localhost 连接：测试进程从 runner 经 docker 网关连入，
+          # 依赖镜像的默认行为容易在基础镜像升级后静默变化，写死更稳。
+          MYSQL_ROOT_HOST: "%"
+          MYSQL_DATABASE: vmq_test
+        ports:
+          - 3306:3306
+        # 官方镜像默认字符集在 5.7 上是 latin1，而生产 DSN 用 utf8mb4；
+        # 不统一会让「中文写入/比较」类用例在 CI 与线上表现不一致。
+        # 5.7 的默认认证插件本就是 mysql_native_password，无需再传
+        # --default-authentication-plugin；go-sql-driver 的 allowNativePasswords
+        # 默认即为 true，因此 DSN 也不必追加该参数。
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+          --character-set-server=utf8mb4
+          --collation-server=utf8mb4_unicode_ci
+    env:
+      # 指向本 job 的服务容器；库名与 MYSQL_DATABASE 一致。用例会 DROP TABLE orders
+      # 并按三套不同 DDL 重建，因此必须是一次性容器里的 vmq_test，绝不能指向共享或生产库。
+      VMQ_TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/vmq_test?parseTime=true&charset=utf8mb4&loc=UTC
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # 不用 -run 过滤：本包的集成用例命名并不齐整（TestMigratePublicTokens* 不含
+      # "Migration"，TestFindByPayIDScopedToMerchant 不含 "Order"），任何看似合理的
+      # 正则都会静默漏跑一半用例，这正是本 workflow 要消灭的「假绿」。整包跑代价很小。
+      #
+      # 不要加 -p / -shuffle / t.Parallel：包内 16 个用例共享同一个物理库并各自
+      # DROP TABLE orders 重建（三套不同 DDL），目前只靠「文件名字典序 + 无并行」确定性通过，
+      # 一旦并行或乱序就会互相污染，出现与本次改动无关的红灯。
+      #
+      # 不加 continue-on-error：DB 用例失败必须让 job 红，否则等于又回到跳过的老路。
+      - name: Run MySQL integration tests
+        run: |
+          set -euo pipefail
+          go test ./internal/adapter/mysql/ -count=1 -v

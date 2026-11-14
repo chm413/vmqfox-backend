@@ -45,7 +45,7 @@ func TestProtocol(t *testing.T) {
 func TestKeyAADMatchesSecretAAD(t *testing.T) {
 	key := Key{MerchantID: 42, Protocol: ProtocolEPayV2, Generation: GenerationCurrent}
 
-	want := secret.AAD(42, 2, 1, "epay.v2.private")
+	want := secret.AAD(42, 2, "epay.v2.private")
 	if got := key.AAD(); !bytes.Equal(got, want) {
 		t.Fatalf("Key.AAD 与 secret.AAD 不一致\n实际: % x\n期望: % x", got, want)
 	}
@@ -53,6 +53,61 @@ func TestKeyAADMatchesSecretAAD(t *testing.T) {
 	v1 := Key{MerchantID: 42, Protocol: ProtocolEPayV1, Generation: GenerationPrevious}
 	if bytes.Equal(v1.AAD(), key.AAD()) {
 		t.Fatal("V1 与 V2 的 AAD 相同，密文可被跨协议复用")
+	}
+}
+
+// TestKeyCiphertextSurvivesGenerationDemotion 直接跑一遍真实加解密：
+// 用当前代 AAD 封装的密文，在行被降到 generation=0 之后必须仍能解开。
+// 仓储 Rotate 只做 UPDATE generation，不重新加密，这个断言就是那条链路的护栏。
+func TestKeyCiphertextSurvivesGenerationDemotion(t *testing.T) {
+	box, err := secret.New(map[int][]byte{1: bytes.Repeat([]byte{0x11}, 32)}, 1)
+	if err != nil {
+		t.Fatalf("构造主密钥 Box 失败: %v", err)
+	}
+	plain := []byte("abcdefghjkmnpqrstuvwxyz23456789")
+
+	current := Key{MerchantID: 7, Protocol: ProtocolEPayV1, Generation: GenerationCurrent}
+	cipherText, nonce, version, err := box.Seal(plain, current.AAD())
+	if err != nil {
+		t.Fatalf("加密失败: %v", err)
+	}
+
+	// 模拟仓储轮换的降级：只改 generation，密文与 nonce 原样不动。
+	demoted := current
+	demoted.Generation = GenerationPrevious
+	demoted.SecretCipher, demoted.SecretNonce, demoted.KeyVersion = cipherText, nonce, version
+
+	got, err := box.Open(demoted.SecretCipher, demoted.SecretNonce, demoted.AAD(), demoted.KeyVersion)
+	if err != nil {
+		t.Fatalf("降级为 generation=0 后旧密文必须仍可解密，实际: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("降级后解出的明文不一致\n实际: %q\n期望: %q", got, plain)
+	}
+}
+
+// TestKeyAADIndependentOfGeneration 是轮换后旧代仍可解密的回归护栏：
+// 仓储轮换只把 generation 1→0、不重新加密密文，AAD 若绑定 generation，
+// 旧行在降级瞬间就解不开，「上一代仅用于验签」会退化成「上一代一律签名错误」。
+func TestKeyAADIndependentOfGeneration(t *testing.T) {
+	current := Key{MerchantID: 42, Protocol: ProtocolEPayV1, Generation: GenerationCurrent}
+	demoted := current
+	demoted.Generation = GenerationPrevious
+
+	if !bytes.Equal(current.AAD(), demoted.AAD()) {
+		t.Fatalf("AAD 不应随 generation 变化，否则降级后的旧密文将无法解密\n当前代: % x\n上一代: % x",
+			current.AAD(), demoted.AAD())
+	}
+	// 商户与协议仍是硬边界：这两项变了必须导致 AAD 变化。
+	otherMerchant := current
+	otherMerchant.MerchantID = 43
+	if bytes.Equal(otherMerchant.AAD(), current.AAD()) {
+		t.Fatal("换商户后 AAD 相同，密文可被跨商户复用")
+	}
+	otherProtocol := current
+	otherProtocol.Protocol = ProtocolEPayV2
+	if bytes.Equal(otherProtocol.AAD(), current.AAD()) {
+		t.Fatal("换协议后 AAD 相同，密文可被跨协议复用")
 	}
 }
 
