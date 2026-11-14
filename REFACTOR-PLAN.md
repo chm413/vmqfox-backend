@@ -14,6 +14,11 @@
 - 以 `database/schema.sql` 作为唯一数据库结构来源，在空 MySQL 实例上完成初始化。
 - 交付可直接通过 Docker Compose 启动的前端、Nginx、Go API 和 MySQL 组合。
 
+> 注（2026-11）：**第 12 行「不引入租户或数据隔离」已被 V3.3 的 EPay 多商户设计部分推翻**——
+> 新增 `merchants` / `merchant_keys` 与订单级 `merchant_id` 维度，订单按商户隔离。
+> 未变的边界：管理员仍唯一（`admin_credentials.singleton_guard`），不引入角色/权限体系，
+> 商户不是登录主体、没有后台。详见 `docs/EPay兼容与多商户设计.md`。
+
 ### 1.2 不在本次重构范围内
 
 - 旧 PHP 四表数据迁移、导入、双写或兼容读取。
