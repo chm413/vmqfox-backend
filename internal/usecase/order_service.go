@@ -202,7 +202,8 @@ func (s *OrderService) Create(ctx context.Context, input CreateOrderInput) (Crea
 		}
 
 		err = s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
-			if _, findErr := s.orders.FindByPayIDForUpdate(txCtx, input.PayID); findErr == nil {
+			// 原生接口固定是系统商户（merchant_id=0），重复单号检查也只在这个维度内成立。
+			if _, findErr := s.orders.FindByPayIDForUpdate(txCtx, 0, input.PayID); findErr == nil {
 				return fail(CodeDuplicateOrder, "商户订单号已存在，请勿重复提交")
 			} else if !errors.Is(findErr, port.ErrNotFound) {
 				return wrap(CodeDependency, "检查商户订单号失败", findErr)

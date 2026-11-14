@@ -4,18 +4,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hulisang/vmqfox-backend/database"
 	"gorm.io/gorm"
 )
 
 // resetMigrationState 清掉本次迁移涉及的表，让每个用例从「空库」开始。
-// 只动 merchants / merchant_keys / schema_migrations，不碰既有业务表。
+// orders 也要回到「改造前」的形态：002/003 是 ALTER TABLE，表不存在就无从验证，
+// 这里用 legacyOrdersDDL 当「已存在的旧订单表」替身（列与本次加列无关，只关心表在）。
 func resetMigrationState(t *testing.T, db *gorm.DB) {
 	t.Helper()
-	for _, table := range []string{"merchant_keys", "merchants", schemaMigrationsTable} {
+	for _, table := range []string{"merchant_keys", "merchants", schemaMigrationsTable, "orders"} {
 		if err := db.Exec("DROP TABLE IF EXISTS " + table).Error; err != nil {
 			t.Fatalf("清理表 %s 失败: %v", table, err)
 		}
+	}
+	if err := db.Exec(legacyOrdersDDL).Error; err != nil {
+		t.Fatalf("重建改造前的 orders 表失败: %v", err)
 	}
 }
 
@@ -60,9 +63,9 @@ func TestMigrationAppliesAndIsIdempotent(t *testing.T) {
 	db := openTestDatabase(t)
 	resetMigrationState(t, db)
 
-	migrations, err := database.Migrations()
+	migrations, err := migrationSteps()
 	if err != nil {
-		t.Fatalf("解析迁移脚本失败: %v", err)
+		t.Fatalf("解析迁移失败: %v", err)
 	}
 
 	applied, err := Migrate(db)
@@ -76,6 +79,21 @@ func TestMigrationAppliesAndIsIdempotent(t *testing.T) {
 		if !migrationTableExists(t, db, table) {
 			t.Fatalf("迁移后应存在表 %s", table)
 		}
+	}
+	// 002/003 的结果必须落在真实表结构上：加列漏一列、索引没换过来都不会影响编译。
+	for _, column := range []string{"merchant_id", "protocol", "epay_type", "merchant_order_name"} {
+		if !db.Migrator().HasColumn("orders", column) {
+			t.Fatalf("迁移后 orders 应存在列 %s", column)
+		}
+	}
+	if db.Migrator().HasIndex("orders", legacyPayIDIndex) {
+		t.Fatalf("迁移后不应再有全局唯一索引 %s", legacyPayIDIndex)
+	}
+	if !db.Migrator().HasIndex("orders", merchantPayIDIndex) {
+		t.Fatalf("迁移后应存在 %s", merchantPayIDIndex)
+	}
+	if !db.Migrator().HasIndex("orders", merchantStateIndex) {
+		t.Fatalf("迁移后应存在 %s", merchantStateIndex)
 	}
 	// 主键顺序决定索引最左前缀，写错会导致按 merchant_id 的单条件查询全表扫描。
 	if primaryKey := merchantKeyPrimaryKey(t, db); primaryKey != "merchant_id,protocol,generation" {
@@ -105,18 +123,18 @@ func TestMigrationSkipsAppliedVersion(t *testing.T) {
 	db := openTestDatabase(t)
 	resetMigrationState(t, db)
 
-	migrations, err := database.Migrations()
+	migrations, err := migrationSteps()
 	if err != nil {
-		t.Fatalf("解析迁移脚本失败: %v", err)
+		t.Fatalf("解析迁移失败: %v", err)
 	}
 	if err := db.Exec(schemaMigrationsDDL).Error; err != nil {
 		t.Fatalf("创建版本表失败: %v", err)
 	}
 	// 先把全部版本标记为已应用，模拟「版本表完整但表被手工删除」。
 	for _, migration := range migrations {
-		record := SchemaMigrationRow{Version: migration.Version, Name: migration.Name, AppliedAt: time.Now().UTC()}
+		record := SchemaMigrationRow{Version: migration.version, Name: migration.name, AppliedAt: time.Now().UTC()}
 		if err := db.Create(&record).Error; err != nil {
-			t.Fatalf("写入版本记录 %d 失败: %v", migration.Version, err)
+			t.Fatalf("写入版本记录 %d 失败: %v", migration.version, err)
 		}
 	}
 

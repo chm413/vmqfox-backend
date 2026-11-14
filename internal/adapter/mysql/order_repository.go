@@ -62,17 +62,21 @@ func (r *OrderRepository) FindByPublicToken(ctx context.Context, token string) (
 	return row.ToDomain(), mapDatabaseError(err)
 }
 
-func (r *OrderRepository) FindByPayID(ctx context.Context, payID string) (order.Order, error) {
+// FindByPayID 按「商户内商户单号」查询。pay_id 的唯一性已是 (merchant_id, pay_id)，
+// 少带 merchant_id 会跨商户串单，且在换索引后失去最左前缀变成全表扫描。
+func (r *OrderRepository) FindByPayID(ctx context.Context, merchantID int64, payID string) (order.Order, error) {
 	var row OrderRow
-	err := databaseFromContext(ctx, r.db).Where("pay_id = ?", payID).Take(&row).Error
+	err := databaseFromContext(ctx, r.db).Where("merchant_id = ? AND pay_id = ?", merchantID, payID).Take(&row).Error
 	return row.ToDomain(), mapDatabaseError(err)
 }
 
-func (r *OrderRepository) FindByPayIDForUpdate(ctx context.Context, payID string) (order.Order, error) {
+// FindByPayIDForUpdate 与 FindByPayID 同维度；调用方在事务内要用它做重复单号检查，
+// 因此 WHERE 必须能命中 uq_orders_merchant_pay_id，否则会锁全表把下单串行化。
+func (r *OrderRepository) FindByPayIDForUpdate(ctx context.Context, merchantID int64, payID string) (order.Order, error) {
 	var row OrderRow
 	err := databaseFromContext(ctx, r.db).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("pay_id = ?", payID).
+		Where("merchant_id = ? AND pay_id = ?", merchantID, payID).
 		Take(&row).Error
 	return row.ToDomain(), mapDatabaseError(err)
 }
@@ -248,24 +252,28 @@ func (r *OrderRepository) DeleteExpiredBefore(ctx context.Context, before time.T
 
 func orderToRow(value order.Order) OrderRow {
 	return OrderRow{
-		ID:              value.ID,
-		OrderID:         value.OrderID,
-		PublicToken:     value.PublicToken,
-		PayID:           value.PayID,
-		PaymentType:     int(value.Type),
-		PriceCent:       value.PriceCents,
-		ReallyPriceCent: value.ReallyPriceCents,
-		PriceText:       value.PriceText,
-		ReallyPriceText: value.ReallyPriceText,
-		State:           int(value.State),
-		Param:           value.Param,
-		PayURL:          value.PayURL,
-		IsAuto:          value.IsAuto,
-		NotifyURL:       value.NotifyURL,
-		ReturnURL:       value.ReturnURL,
-		CreatedAt:       value.CreatedAt,
-		PaidAt:          timePointer(value.PaidAt),
-		ClosedAt:        timePointer(value.ClosedAt),
+		ID:                value.ID,
+		MerchantID:        value.MerchantID,
+		Protocol:          int8(value.Protocol),
+		EpayType:          value.EpayType,
+		MerchantOrderName: value.MerchantOrderName,
+		OrderID:           value.OrderID,
+		PublicToken:       value.PublicToken,
+		PayID:             value.PayID,
+		PaymentType:       int(value.Type),
+		PriceCent:         value.PriceCents,
+		ReallyPriceCent:   value.ReallyPriceCents,
+		PriceText:         value.PriceText,
+		ReallyPriceText:   value.ReallyPriceText,
+		State:             int(value.State),
+		Param:             value.Param,
+		PayURL:            value.PayURL,
+		IsAuto:            value.IsAuto,
+		NotifyURL:         value.NotifyURL,
+		ReturnURL:         value.ReturnURL,
+		CreatedAt:         value.CreatedAt,
+		PaidAt:            timePointer(value.PaidAt),
+		ClosedAt:          timePointer(value.ClosedAt),
 	}
 }
 

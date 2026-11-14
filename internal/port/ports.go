@@ -96,8 +96,10 @@ type OrderRepository interface {
 	FindByOrderID(ctx context.Context, orderID string) (order.Order, error)
 	FindByOrderIDForUpdate(ctx context.Context, orderID string) (order.Order, error)
 	FindByPublicToken(ctx context.Context, token string) (order.Order, error)
-	FindByPayID(ctx context.Context, payID string) (order.Order, error)
-	FindByPayIDForUpdate(ctx context.Context, payID string) (order.Order, error)
+	// FindByPayID / FindByPayIDForUpdate 必须带 merchantID：pay_id 只在商户内唯一，
+	// merchantID=0 表示 VMQ 原生接口（系统商户）。
+	FindByPayID(ctx context.Context, merchantID int64, payID string) (order.Order, error)
+	FindByPayIDForUpdate(ctx context.Context, merchantID int64, payID string) (order.Order, error)
 	List(ctx context.Context, filter OrderFilter) (OrderPage, error)
 	Statistics(ctx context.Context, dayStart, dayEnd time.Time) (OrderStatistics, error)
 	Create(ctx context.Context, value order.Order) (order.Order, error)

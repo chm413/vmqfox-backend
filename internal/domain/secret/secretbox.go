@@ -157,3 +157,21 @@ func Fingerprint(masterKey []byte) (string, error) {
 
 	return hex.EncodeToString(mac.Sum(nil)[:fingerprintHexLen/2]), nil
 }
+
+// Fingerprint 返回「写入版本」主密钥的指纹，与包级 Fingerprint 的算法一致。
+//
+// 只取写入版本：轮换期旧键的职责仅是解开历史密文，把它一并纳入比对会让运维在
+// 清理 VMQ_MASTER_KEY_OLD 时误判成「主密钥配错」。密钥切片本身不外泄，调用方
+// 只能拿到 16 位十六进制摘要。
+func (b *Box) Fingerprint() (string, error) {
+	if b == nil {
+		return "", ErrNoMasterKey
+	}
+
+	key, ok := b.keys[b.writeVersion]
+	if !ok {
+		return "", fmt.Errorf("%w: 版本 %d", ErrUnknownKeyVersion, b.writeVersion)
+	}
+
+	return Fingerprint(key)
+}

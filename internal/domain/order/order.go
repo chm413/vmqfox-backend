@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hulisang/vmqfox-backend/internal/domain/merchant"
 	"github.com/hulisang/vmqfox-backend/internal/domain/payment"
 )
 
@@ -157,22 +158,29 @@ func IsExpired(status Status, createdAt time.Time, timeout time.Duration, now ti
 }
 
 type Order struct {
-	ID               int64
-	OrderID          string
-	PublicToken      string
-	PayID            string
-	Type             payment.Type
-	PriceCents       int64
-	ReallyPriceCents int64
-	PriceText        string
-	ReallyPriceText  string
-	State            Status
-	Param            string
-	PayURL           string
-	IsAuto           bool
-	NotifyURL        string
-	ReturnURL        string
-	CreatedAt        time.Time
-	PaidAt           time.Time
-	ClosedAt         time.Time
+	ID int64
+	// MerchantID 为 0 表示 VMQ 原生接口（系统商户），存量数据与既有集成因此零影响。
+	// 所有按 pay_id 的查询都必须带这个维度：pay_id 的唯一性已从「全局」收敛为「商户内」。
+	MerchantID int64
+	// Protocol 记录下单走的接口协议，回调时据此选密钥（原生单没有密钥）。
+	Protocol          merchant.Protocol
+	OrderID           string
+	PublicToken       string
+	PayID             string
+	Type              payment.Type
+	EpayType          string
+	MerchantOrderName string
+	PriceCents        int64
+	ReallyPriceCents  int64
+	PriceText         string
+	ReallyPriceText   string
+	State             Status
+	Param             string
+	PayURL            string
+	IsAuto            bool
+	NotifyURL         string
+	ReturnURL         string
+	CreatedAt         time.Time
+	PaidAt            time.Time
+	ClosedAt          time.Time
 }

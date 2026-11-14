@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS qrcodes (
 
 CREATE TABLE IF NOT EXISTS orders (
   id BIGINT NOT NULL AUTO_INCREMENT,
+  -- 商户维度（§2.3）。merchant_id=0 是 VMQ 原生接口的系统商户，存量数据零影响。
+  -- 4 列的默认值必须与 002_orders_merchant_columns 迁移完全一致，否则「新装库」与「升级库」漂移。
+  merchant_id BIGINT NOT NULL DEFAULT 0,
+  protocol TINYINT NOT NULL DEFAULT 0,
+  epay_type VARCHAR(16) NOT NULL DEFAULT '',
+  merchant_order_name VARCHAR(128) NOT NULL DEFAULT '',
   order_id VARBINARY(128) NOT NULL,
   public_token CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   pay_id VARBINARY(255) NOT NULL,
@@ -54,7 +60,9 @@ CREATE TABLE IF NOT EXISTS orders (
   PRIMARY KEY (id),
   UNIQUE KEY uq_orders_order_id (order_id),
   UNIQUE KEY uq_orders_public_token (public_token),
-  UNIQUE KEY uq_orders_pay_id (pay_id),
+  -- pay_id 的唯一性是「商户内」而不是全局：不同商户可以撞同一个 out_trade_no。
+  UNIQUE KEY uq_orders_merchant_pay_id (merchant_id, pay_id),
+  KEY idx_orders_merchant_state (merchant_id, state, created_at),
   KEY idx_orders_payment_state_amount (payment_type, state, really_price_cent, id),
   KEY idx_orders_state_created (state, created_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

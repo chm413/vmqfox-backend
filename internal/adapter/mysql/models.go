@@ -4,55 +4,69 @@ import (
 	"time"
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/admin"
+	"github.com/hulisang/vmqfox-backend/internal/domain/merchant"
 	"github.com/hulisang/vmqfox-backend/internal/domain/order"
 	"github.com/hulisang/vmqfox-backend/internal/domain/payment"
 	"github.com/hulisang/vmqfox-backend/internal/domain/qrcode"
 )
 
 // OrderRow 是 Go 原生订单表映射，金额始终以整数分为业务主表示。
+//
+// 唯一索引从 uq_orders_pay_id 换成 uq_orders_merchant_pay_id（merchant_id 在前）：
+// 最左前缀必须是 merchant_id，否则按商户查单会失去索引走全表扫描；
+// 索引实际由 003_orders_merchant_index 迁移创建，这里的 tag 只用于声明语义。
 type OrderRow struct {
-	ID              int64      `gorm:"column:id;primaryKey;autoIncrement"`
-	OrderID         string     `gorm:"column:order_id;not null;uniqueIndex:uq_orders_order_id"`
-	PublicToken     string     `gorm:"column:public_token;type:char(64);not null;uniqueIndex:uq_orders_public_token"`
-	PayID           string     `gorm:"column:pay_id;not null;uniqueIndex:uq_orders_pay_id"`
-	PaymentType     int        `gorm:"column:payment_type;not null"`
-	PriceCent       int64      `gorm:"column:price_cent;not null"`
-	ReallyPriceCent int64      `gorm:"column:really_price_cent;not null"`
-	PriceText       string     `gorm:"column:price_text;not null"`
-	ReallyPriceText string     `gorm:"column:really_price_text;not null"`
-	State           int        `gorm:"column:state;not null"`
-	Param           string     `gorm:"column:param;not null"`
-	PayURL          string     `gorm:"column:pay_url;not null;type:text"`
-	IsAuto          bool       `gorm:"column:is_auto;not null"`
-	NotifyURL       string     `gorm:"column:notify_url;not null;type:text"`
-	ReturnURL       string     `gorm:"column:return_url;not null;type:text"`
-	CreatedAt       time.Time  `gorm:"column:created_at;not null"`
-	PaidAt          *time.Time `gorm:"column:paid_at"`
-	ClosedAt        *time.Time `gorm:"column:closed_at"`
+	ID int64 `gorm:"column:id;primaryKey;autoIncrement"`
+	// merchant_id=0 是系统商户（VMQ 原生接口）。
+	MerchantID        int64      `gorm:"column:merchant_id;not null;uniqueIndex:uq_orders_merchant_pay_id,priority:1;index:idx_orders_merchant_state,priority:1"`
+	Protocol          int8       `gorm:"column:protocol;not null"`
+	EpayType          string     `gorm:"column:epay_type;not null"`
+	MerchantOrderName string     `gorm:"column:merchant_order_name;not null"`
+	OrderID           string     `gorm:"column:order_id;not null;uniqueIndex:uq_orders_order_id"`
+	PublicToken       string     `gorm:"column:public_token;type:char(64);not null;uniqueIndex:uq_orders_public_token"`
+	PayID             string     `gorm:"column:pay_id;not null;uniqueIndex:uq_orders_merchant_pay_id,priority:2"`
+	PaymentType       int        `gorm:"column:payment_type;not null"`
+	PriceCent         int64      `gorm:"column:price_cent;not null"`
+	ReallyPriceCent   int64      `gorm:"column:really_price_cent;not null"`
+	PriceText         string     `gorm:"column:price_text;not null"`
+	ReallyPriceText   string     `gorm:"column:really_price_text;not null"`
+	State             int        `gorm:"column:state;not null;index:idx_orders_merchant_state,priority:2"`
+	Param             string     `gorm:"column:param;not null"`
+	PayURL            string     `gorm:"column:pay_url;not null;type:text"`
+	IsAuto            bool       `gorm:"column:is_auto;not null"`
+	NotifyURL         string     `gorm:"column:notify_url;not null;type:text"`
+	ReturnURL         string     `gorm:"column:return_url;not null;type:text"`
+	CreatedAt         time.Time  `gorm:"column:created_at;not null;index:idx_orders_merchant_state,priority:3"`
+	PaidAt            *time.Time `gorm:"column:paid_at"`
+	ClosedAt          *time.Time `gorm:"column:closed_at"`
 }
 
 func (OrderRow) TableName() string { return "orders" }
 
 func (m OrderRow) ToDomain() order.Order {
 	return order.Order{
-		ID:               m.ID,
-		OrderID:          m.OrderID,
-		PublicToken:      m.PublicToken,
-		PayID:            m.PayID,
-		Type:             payment.Type(m.PaymentType),
-		PriceCents:       m.PriceCent,
-		ReallyPriceCents: m.ReallyPriceCent,
-		PriceText:        m.PriceText,
-		ReallyPriceText:  m.ReallyPriceText,
-		State:            order.Status(m.State),
-		Param:            m.Param,
-		PayURL:           m.PayURL,
-		IsAuto:           m.IsAuto,
-		NotifyURL:        m.NotifyURL,
-		ReturnURL:        m.ReturnURL,
-		CreatedAt:        m.CreatedAt,
-		PaidAt:           timeValue(m.PaidAt),
-		ClosedAt:         timeValue(m.ClosedAt),
+		ID:                m.ID,
+		MerchantID:        m.MerchantID,
+		Protocol:          merchant.Protocol(m.Protocol),
+		OrderID:           m.OrderID,
+		PublicToken:       m.PublicToken,
+		PayID:             m.PayID,
+		Type:              payment.Type(m.PaymentType),
+		EpayType:          m.EpayType,
+		MerchantOrderName: m.MerchantOrderName,
+		PriceCents:        m.PriceCent,
+		ReallyPriceCents:  m.ReallyPriceCent,
+		PriceText:         m.PriceText,
+		ReallyPriceText:   m.ReallyPriceText,
+		State:             order.Status(m.State),
+		Param:             m.Param,
+		PayURL:            m.PayURL,
+		IsAuto:            m.IsAuto,
+		NotifyURL:         m.NotifyURL,
+		ReturnURL:         m.ReturnURL,
+		CreatedAt:         m.CreatedAt,
+		PaidAt:            timeValue(m.PaidAt),
+		ClosedAt:          timeValue(m.ClosedAt),
 	}
 }
 

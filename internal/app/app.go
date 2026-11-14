@@ -14,6 +14,7 @@ import (
 	"github.com/hulisang/vmqfox-backend/internal/adapter/system"
 	"github.com/hulisang/vmqfox-backend/internal/auth"
 	"github.com/hulisang/vmqfox-backend/internal/config"
+	"github.com/hulisang/vmqfox-backend/internal/domain/secret"
 	transport "github.com/hulisang/vmqfox-backend/internal/http"
 	"github.com/hulisang/vmqfox-backend/internal/http/handler"
 	"github.com/hulisang/vmqfox-backend/internal/http/middleware"
@@ -35,6 +36,15 @@ type App struct {
 	start      sync.Once
 	close      sync.Once
 	closeErr   error
+
+	// MerchantRepo / MerchantKeyRepo 暂时没有 handler 消费，先由装配层持有，
+	// 供 P1 的商户管理用例直接复用同一批仓储实例——避免每个用例各自 New 一份，
+	// 导致事务边界与连接池使用不可控。
+	MerchantRepo    *mysql.MerchantRepository
+	MerchantKeyRepo *mysql.MerchantKeyRepository
+	// MasterKeys 是主密钥 Box；未配置 VMQ_MASTER_KEY 时为 nil，所有加解密会返回
+	// ErrNoMasterKey，绝不退化为明文。nil 与非 nil 的判定只发生在用例层。
+	MasterKeys *secret.Box
 }
 
 func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger *log.Logger) (*App, error) {
@@ -60,10 +70,19 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 	qrcodes := mysql.NewQRCodeRepository(db)
 	paymentEvents := mysql.NewPaymentEventRepository(db)
 	outbox := mysql.NewOutboxRepository(db)
+	merchantRepo := mysql.NewMerchantRepository(db)
+	merchantKeyRepo := mysql.NewMerchantKeyRepository(db)
 	clock := system.Clock{}
 	publicTokens := system.PublicTokenGenerator{}
 	passwords := auth.NewBcryptPasswordHasher()
 	qrImageCodec := qrcodeimage.New()
+
+	// 主密钥自检放在用例装配之前：配错/缺失的主密钥必须比任何服务先失败，
+	// 否则会出现「进程起来了、界面正常、所有商户验签失败」的静默故障。
+	masterKeys, err := configureMasterKey(cfg.MasterKey, settings, logger)
+	if err != nil {
+		return nil, err
+	}
 
 	authService, err := usecase.NewAuthService(usecase.AuthServiceDeps{
 		Credentials: credentials,
@@ -195,8 +214,11 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 	})
 
 	return &App{
-		db:   db,
-		jobs: backgroundJobs,
+		db:              db,
+		jobs:            backgroundJobs,
+		MerchantRepo:    merchantRepo,
+		MerchantKeyRepo: merchantKeyRepo,
+		MasterKeys:      masterKeys,
 		server: &http.Server{
 			Addr:              cfg.Server.Address(),
 			Handler:           engine,

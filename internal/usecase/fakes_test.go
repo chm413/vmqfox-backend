@@ -206,11 +206,11 @@ func (stubOrderRepository) FindByPublicToken(context.Context, string) (order.Ord
 	return order.Order{}, port.ErrNotFound
 }
 
-func (stubOrderRepository) FindByPayID(context.Context, string) (order.Order, error) {
+func (stubOrderRepository) FindByPayID(context.Context, int64, string) (order.Order, error) {
 	return order.Order{}, port.ErrNotFound
 }
 
-func (stubOrderRepository) FindByPayIDForUpdate(context.Context, string) (order.Order, error) {
+func (stubOrderRepository) FindByPayIDForUpdate(context.Context, int64, string) (order.Order, error) {
 	return order.Order{}, port.ErrNotFound
 }
 
