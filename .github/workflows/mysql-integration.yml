@@ -108,8 +108,17 @@ jobs:
       # 不加 continue-on-error：DB 用例失败必须让 job 红，否则等于又回到跳过的老路。
       - name: Run MySQL integration tests
         run: |
-          set -euo pipefail
-          go test ./internal/adapter/mysql/ -count=1 -v
+          set +e
+          go test ./internal/adapter/mysql/ -count=1 -v 2>&1 | tee /tmp/mysql-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # 公开仓库的 run logs 要 admin 权限才能下载，而 check-run annotation 匿名可读。
+            # 把失败细节折叠成 annotation，是这条流水线唯一不需要凭据的排障通道。
+            grep -E -- "--- FAIL|_test\.go:[0-9]+:|Error [0-9]+ \(|ERROR [0-9]{4}" /tmp/mysql-test.log \
+              | tail -n 25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            exit "$status"
+          fi
 
       # 无论成败都留证据：容器没起来、用例半途崩、连接被拒，容器日志都是第一手材料。
       - name: Dump MySQL logs
