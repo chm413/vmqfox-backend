@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hulisang/vmqfox-backend/internal/domain/epay"
 	"github.com/hulisang/vmqfox-backend/internal/domain/merchant"
 	"github.com/hulisang/vmqfox-backend/internal/domain/order"
 	"github.com/hulisang/vmqfox-backend/internal/domain/payment"
@@ -58,8 +59,11 @@ func (m epayV1Merchants) Delete(context.Context, int64) error { return nil }
 
 func (m epayV1Merchants) Count(context.Context) (int64, error) { return int64(len(m.byNo)), nil }
 
-// epayV1Keys 只实现 FindActive：下单路径只会取当前代密钥。
-type epayV1Keys struct{ active map[string]merchant.Key }
+// epayV1Keys 只实现下单所需的 FindActive；verify 用于覆盖轮换窗口的两代验签。
+type epayV1Keys struct {
+	active map[string]merchant.Key
+	verify map[string][]merchant.Key
+}
 
 func epayV1KeySlot(merchantID int64, protocol merchant.Protocol) string {
 	return strconv.FormatInt(merchantID, 10) + "/" + strconv.Itoa(int(protocol))
@@ -73,8 +77,17 @@ func (k epayV1Keys) FindActive(_ context.Context, merchantID int64, protocol mer
 	return key, nil
 }
 
-func (k epayV1Keys) FindAllForVerify(context.Context, int64, merchant.Protocol) ([]merchant.Key, error) {
-	return nil, nil
+func (k epayV1Keys) FindAllForVerify(_ context.Context, merchantID int64, protocol merchant.Protocol) ([]merchant.Key, error) {
+	slot := epayV1KeySlot(merchantID, protocol)
+	if keys, ok := k.verify[slot]; ok {
+		return keys, nil
+	}
+	key, ok := k.active[slot]
+	if !ok {
+		return nil, nil
+	}
+	// 真实仓储按 generation 降序返回，当前代在前；桩保持一致。
+	return []merchant.Key{key}, nil
 }
 
 func (k epayV1Keys) Upsert(context.Context, merchant.Key) error { return nil }
@@ -246,9 +259,14 @@ func epayV1TestService(t *testing.T, settings map[string]string) (*EPayService, 
 	merchants := epayV1Merchants{byNo: map[string]merchant.Merchant{
 		testMerchantNo: {ID: testMerchantID, No: testMerchantNo, Enabled: true},
 	}}
-	env.keys = epayV1Keys{active: map[string]merchant.Key{
-		epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV1): sealEPayV1Key(t, box, testMerchantID, testV1Secret),
-	}}
+	env.keys = epayV1Keys{
+		active: map[string]merchant.Key{
+			epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV1): sealEPayV1Key(t, box, testMerchantID, testV1Secret),
+		},
+		// verify 必须在构造服务之前建好：服务持有的是结构体副本，
+		// 构造后再给 env.keys.verify 赋新 map 不会传到服务里（轮换用例就踩过这个坑）。
+		verify: map[string][]merchant.Key{},
+	}
 
 	service, err := NewEPayService(EPayServiceDeps{
 		Orders:       core,
@@ -528,6 +546,42 @@ func TestEPayAuthenticateGoldenVector(t *testing.T) {
 		t.Fatal("篡改金额后必须验签失败")
 	} else if code, _ := ErrorCodeOf(err); code != CodeInvalidSignature {
 		t.Fatalf("应返回 CodeInvalidSignature，实际 code=%v err=%v", code, err)
+	}
+}
+
+// TestEPayAuthenticateAcceptsPreviousGeneration 覆盖轮换窗口：商户还没换成新 key 时，
+// 用上一代密钥签的请求必须验通。只认当前代会让「轮换」这个动作把在途下单全部打挂，
+// 而商户侧只会看到「签名错误」，排查方向会被引向密钥配错。
+func TestEPayAuthenticateAcceptsPreviousGeneration(t *testing.T) {
+	const previousSecret = "abcdefghjkmnpqrstuvwxyz23456789k"
+
+	service, env := epayV1TestService(t, nil)
+	slot := epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV1)
+	if env.keys.verify == nil {
+		env.keys.verify = map[string][]merchant.Key{}
+	}
+	current := sealEPayV1Key(t, env.box, testMerchantID, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+	previous := sealEPayV1Key(t, env.box, testMerchantID, previousSecret)
+	previous.Generation = merchant.GenerationPrevious
+	env.keys.verify[slot] = []merchant.Key{current, previous}
+
+	params := map[string]string{
+		"pid":          testMerchantNo,
+		"type":         "alipay",
+		"out_trade_no": "M20261113002",
+		"notify_url":   "https://m.example.com/notify",
+		"name":         "测试商品",
+		"money":        "12.50",
+	}
+	sign, err := epay.SignV1(params, previousSecret)
+	if err != nil {
+		t.Fatalf("构造上一代签名失败: %v", err)
+	}
+	params["sign"] = sign
+	params["sign_type"] = "MD5"
+
+	if _, err := service.Authenticate(context.Background(), params); err != nil {
+		t.Fatalf("上一代密钥应能通过验签，实际 err=%v", err)
 	}
 }
 

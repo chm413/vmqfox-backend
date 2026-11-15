@@ -161,19 +161,22 @@ func (s *EPayService) Authenticate(ctx context.Context, params map[string]string
 		return merchant.Merchant{}, fail(CodeInvalidArgument, "商户不存在")
 	}
 
-	secretText, err := s.v1Secret(ctx, value)
-	if err != nil {
-		return merchant.Merchant{}, err
-	}
-
 	if err := epay.RejectAmbiguous(params); err != nil {
 		return merchant.Merchant{}, fail(CodeInvalidSignature, "签名错误")
 	}
-	if err := epay.VerifyV1(params, secretText, params["sign"]); err != nil {
-		// ErrAmbiguousParam 与 ErrSignature 对外同码同文案；区别只进内部日志。
-		return merchant.Merchant{}, fail(CodeInvalidSignature, "签名错误")
+	secrets, err := s.v1SecretsForVerify(ctx, value)
+	if err != nil {
+		return merchant.Merchant{}, err
 	}
-	return value, nil
+	// 轮换期商户仍在用上一代密钥签名，必须两代都试。
+	// 只试当前代会让轮换后所有在途请求失败，而商户侧只看到「签名错误」，
+	// 排查方向会被引向「密钥配错」，实际只是没来得及换 key。
+	for _, secretText := range secrets {
+		if verifyErr := epay.VerifyV1(params, secretText, params["sign"]); verifyErr == nil {
+			return value, nil
+		}
+	}
+	return merchant.Merchant{}, fail(CodeInvalidSignature, "签名错误")
 }
 
 // v1Secret 取出并解密该商户当前代的 V1 共享密钥。
@@ -202,6 +205,42 @@ func (s *EPayService) v1Secret(ctx context.Context, value merchant.Merchant) (st
 		return "", fail(CodeConfiguration, "商户密钥格式无效")
 	}
 	return secretText, nil
+}
+
+// v1SecretsForVerify 取出该商户 V1 的全部可验签密钥（当前代在前、上一代在后）。
+//
+// 与 v1Secret 的分工：v1Secret 只取当前代，用于我方发起签名（下单/回调）；
+// 这里用于验签（商户发起），轮换期必须两代都认——商户换 key 需要时间，
+// 只认当前代会让窗口内所有请求报「签名错误」，而真正原因只是密钥没换完。
+func (s *EPayService) v1SecretsForVerify(ctx context.Context, value merchant.Merchant) ([]string, error) {
+	keys, err := s.merchantKeys.FindAllForVerify(ctx, value.ID, merchant.ProtocolEPayV1)
+	if err != nil {
+		return nil, wrap(CodeDependency, "读取商户密钥失败", err)
+	}
+	if len(keys) == 0 {
+		return nil, fail(CodeConfiguration, "该商户未开通 V1 接口")
+	}
+	if s.masterKeys == nil {
+		return nil, fail(CodeConfiguration, "商户密钥不可用")
+	}
+
+	secrets := make([]string, 0, len(keys))
+	for _, key := range keys {
+		plain, openErr := s.masterKeys.Open(key.SecretCipher, key.SecretNonce, key.AAD(), key.KeyVersion)
+		if openErr != nil {
+			// 两代的 master key 版本可能不同，单代解不开不应拖累另一代。
+			continue
+		}
+		secretText := string(plain)
+		if !merchant.IsValidV1Secret(secretText) {
+			continue
+		}
+		secrets = append(secrets, secretText)
+	}
+	if len(secrets) == 0 {
+		return nil, fail(CodeConfiguration, "商户密钥不可用")
+	}
+	return secrets, nil
 }
 
 // Create 是 EPay V1 的下单入口。

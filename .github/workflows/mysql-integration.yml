@@ -38,29 +38,6 @@ jobs:
       contents: read
     # 卡死保护：数据库用例若等待锁/连接不复位，默认会占用 runner 上限数小时。
     timeout-minutes: 15
-    services:
-      mysql:
-        image: mysql:5.7
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          # 显式声明 root 允许非 localhost 连接：测试进程从 runner 经 docker 网关连入，
-          # 依赖镜像的默认行为容易在基础镜像升级后静默变化，写死更稳。
-          MYSQL_ROOT_HOST: "%"
-          MYSQL_DATABASE: vmq_test
-        ports:
-          - 3306:3306
-        # 官方镜像默认字符集在 5.7 上是 latin1，而生产 DSN 用 utf8mb4；
-        # 不统一会让「中文写入/比较」类用例在 CI 与线上表现不一致。
-        # 5.7 的默认认证插件本就是 mysql_native_password，无需再传
-        # --default-authentication-plugin；go-sql-driver 的 allowNativePasswords
-        # 默认即为 true，因此 DSN 也不必追加该参数。
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -proot"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
-          --character-set-server=utf8mb4
-          --collation-server=utf8mb4_unicode_ci
     env:
       # 指向本 job 的服务容器；库名与 MYSQL_DATABASE 一致。用例会 DROP TABLE orders
       # 并按三套不同 DDL 重建，因此必须是一次性容器里的 vmq_test，绝不能指向共享或生产库。
@@ -75,6 +52,51 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # 为什么不用 services:（2026-xx 实测记录）
+      # run 43583004236 在 "Initialize containers" 阶段失败，而 services 的失败日志需要
+      # admin 权限，公开 API 返回 403 —— 既不知道是拉镜像失败、health-cmd 超时还是别的原因，
+      # 后面所有步骤被 skip，等于一个只说「坏了」不说「哪儿坏」的门禁。
+      # 改成显式 docker run：同一个失败下次会连同容器日志一起打出来，可见性换可维护性。
+      - name: Show runner and Docker info
+        run: |
+          set -uo pipefail
+          uname -m
+          docker version
+          docker info --format '{{.ServerVersion}} {{.Driver}}'
+
+      # 5.7 的默认认证插件本就是 mysql_native_password，无需 --default-authentication-plugin；
+      # go-sql-driver 的 allowNativePasswords 默认 true，DSN 也不必追加该参数。
+      # 官方镜像默认字符集在 5.7 上是 latin1，而生产 DSN 用 utf8mb4，这里显式对齐。
+      - name: Start MySQL 5.7
+        run: |
+          set -euo pipefail
+          docker run -d --name mysql57 \
+            -e MYSQL_ROOT_PASSWORD=root \
+            -e MYSQL_ROOT_HOST=% \
+            -e MYSQL_DATABASE=vmq_test \
+            -p 3306:3306 \
+            mysql:5.7 \
+            --character-set-server=utf8mb4 \
+            --collation-server=utf8mb4_unicode_ci
+
+      # 不用 services 的 health-cmd，改为自己轮询 docker exec：
+      # 5.7 初始化期间 mysqld 会先起一个临时实例再重启，只看到「端口通」就开跑会随机失败。
+      # 超时后必须把容器日志与退出码打出来，否则又是一次盲猜。
+      - name: Wait for MySQL
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if docker exec mysql57 mysqladmin ping -uroot -proot --silent >/dev/null 2>&1; then
+              echo "MySQL is ready after ${i} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::MySQL 未在 120s 内就绪"
+          docker logs mysql57 || true
+          docker inspect mysql57 --format '{{.State.Status}} {{.State.ExitCode}}' || true
+          exit 1
+
       # 不用 -run 过滤：本包的集成用例命名并不齐整（TestMigratePublicTokens* 不含
       # "Migration"，TestFindByPayIDScopedToMerchant 不含 "Order"），任何看似合理的
       # 正则都会静默漏跑一半用例，这正是本 workflow 要消灭的「假绿」。整包跑代价很小。
@@ -88,3 +110,10 @@ jobs:
         run: |
           set -euo pipefail
           go test ./internal/adapter/mysql/ -count=1 -v
+
+      # 无论成败都留证据：容器没起来、用例半途崩、连接被拒，容器日志都是第一手材料。
+      - name: Dump MySQL logs
+        if: always()
+        run: |
+          set -uo pipefail
+          docker logs mysql57 2>&1 | tail -n 200 || true
