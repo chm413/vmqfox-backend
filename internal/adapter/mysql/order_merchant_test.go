@@ -47,9 +47,11 @@ func resetOrdersTable(t *testing.T, db *gorm.DB) {
 
 func newMerchantOrder(merchantID int64, payID, token string) order.Order {
 	return order.Order{
-		MerchantID:        merchantID,
-		Protocol:          merchant.ProtocolNative,
-		OrderID:           "OID-" + token[:8],
+		MerchantID: merchantID,
+		Protocol:   merchant.ProtocolNative,
+		// 取 token 的尾部：hexToken 是 %064x，前 8 位对小数种子恒为 0，
+		// 用头部切片会让每个用例拿到同一个 OID，撞上 uq_orders_order_id 而不是被测的唯一键。
+		OrderID:           "OID-" + token[len(token)-8:],
 		PublicToken:       token,
 		PayID:             payID,
 		Type:              payment.Alipay,
