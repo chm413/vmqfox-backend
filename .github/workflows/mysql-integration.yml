@@ -85,17 +85,27 @@ jobs:
       - name: Wait for MySQL
         run: |
           set -euo pipefail
+          ready=0
           for i in $(seq 1 60); do
-            if docker exec mysql57 mysqladmin ping -uroot -proot --silent >/dev/null 2>&1; then
-              echo "MySQL is ready after ${i} attempts"
-              exit 0
+            if docker exec mysql57 mysql -uroot -proot -e 'SELECT 1' >/dev/null 2>&1; then
+              # 5.7 的 entrypoint 会先起一个临时实例跑 init，再关掉重启正式实例。
+              # 只探一次会在两个实例之间抢跑：连接刚建好就被重启打断，
+              # 表现是整批用例 "invalid connection"（不是代码问题，但看起来像）。
+              sleep 5
+              if docker exec mysql57 mysql -uroot -proot -e 'SELECT 1' >/dev/null 2>&1; then
+                echo "MySQL is stable after ${i} attempts"
+                ready=1
+                break
+              fi
             fi
             sleep 2
           done
-          echo "::error::MySQL 未在 120s 内就绪"
-          docker logs mysql57 || true
-          docker inspect mysql57 --format '{{.State.Status}} {{.State.ExitCode}}' || true
-          exit 1
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::MySQL 未在 120s 内稳定"
+            docker logs mysql57 || true
+            docker inspect mysql57 --format '{{.State.Status}} {{.State.ExitCode}}' || true
+            exit 1
+          fi
 
       # 不用 -run 过滤：本包的集成用例命名并不齐整（TestMigratePublicTokens* 不含
       # "Migration"，TestFindByPayIDScopedToMerchant 不含 "Order"），任何看似合理的
@@ -114,9 +124,14 @@ jobs:
           if [ "$status" -ne 0 ]; then
             # 公开仓库的 run logs 要 admin 权限才能下载，而 check-run annotation 匿名可读。
             # 把失败细节折叠成 annotation，是这条流水线唯一不需要凭据的排障通道。
-            grep -E -- "--- FAIL|_test\.go:[0-9]+:|Error [0-9]+ \(|ERROR [0-9]{4}" /tmp/mysql-test.log \
-              | tail -n 25 \
-              | while IFS= read -r line; do echo "::error::$line"; done
+            # 必须同时给「最早」与「最后」：最早的失败是根因，最后的失败只是它的余波
+            # （例如连接被重启打断后，后续每条用例都会 "invalid connection"）。
+            grep -E -- "--- FAIL|_test\.go:[0-9]+:|Error [0-9]+ \(|ERROR [0-9]{4}" /tmp/mysql-test.log > /tmp/mysql-fail.txt || true
+            {
+              head -n 12 /tmp/mysql-fail.txt
+              echo "……（中间省略，完整输出见本步骤日志）"
+              tail -n 10 /tmp/mysql-fail.txt
+            } | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
 
