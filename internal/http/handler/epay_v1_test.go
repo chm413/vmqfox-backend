@@ -345,3 +345,32 @@ func TestEPayErrorMessageFoldsInternalErrors(t *testing.T) {
 		t.Fatalf("用例错误应原样透出文案，实际 %q", got)
 	}
 }
+
+// TestEPaySubmitAmbiguousAndBadSignAreIndistinguishable 守住设计 §5.5 #11 的「不可区分性」：
+// 参数歧义与验签失败必须返回逐字节相同的响应，否则攻击者能靠响应差异判断探测进展。
+// 这比「body 包含某个文案常量」强得多——后者用的是常量本身做断言，改文案时断言跟着变，
+// 永远恒真（实测：把常量改成任意字符串，那两条用例依然绿）。
+func TestEPaySubmitAmbiguousAndBadSignAreIndistinguishable(t *testing.T) {
+	ambiguousHandler := NewEPayV1Handler(&stubEPayManager{})
+	ambiguousCtx, ambiguousRec := epayV1TestContext(t, http.MethodGet,
+		"http://gw.test/submit.php?pid=M1&money=12.50&money=1.00", "")
+	ambiguousHandler.Submit(ambiguousCtx)
+
+	badSignHandler := NewEPayV1Handler(&stubEPayManager{authErr: &usecase.Error{
+		Code:    usecase.CodeInvalidSignature,
+		Message: "签名错误",
+	}})
+	badSignCtx, badSignRec := epayV1TestContext(t, http.MethodGet,
+		"http://gw.test/submit.php?pid=M1&money=12.50", "")
+	badSignHandler.Submit(badSignCtx)
+
+	if ambiguousRec.Code != badSignRec.Code {
+		t.Fatalf("两条路径的状态码必须一致：歧义=%d 验签失败=%d", ambiguousRec.Code, badSignRec.Code)
+	}
+	if got, want := ambiguousRec.Body.String(), badSignRec.Body.String(); got != want {
+		t.Fatalf("参数歧义与验签失败的响应必须逐字节相同；歧义: %s；验签: %s", got, want)
+	}
+	if ct1, ct2 := ambiguousRec.Header().Get("Content-Type"), badSignRec.Header().Get("Content-Type"); ct1 != ct2 {
+		t.Fatalf("Content-Type 也必须一致：%q vs %q", ct1, ct2)
+	}
+}
