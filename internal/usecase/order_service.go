@@ -754,6 +754,10 @@ func (s *OrderService) DeleteExpired(ctx context.Context) (int64, error) {
 
 		// 释放条件直接挂在 orders 上，且不设批量上限：
 		// 旧实现只给前 500 笔过期订单释放锁，却删除全部过期订单，超出部分会留下永久孤儿锁。
+		//
+		// 仓储侧只释放「已离开 pending」的订单锁：EPay 商户的支付窗口可能远大于全局
+		// settings.close，若把仍在窗口内的订单锁一并删掉，同一金额会被新订单再次占用，
+		// 而原单仍可支付——等于同一份金额卖两次。
 		if err := s.priceLocks.ReleaseByOrdersBefore(txCtx, cutoff); err != nil {
 			return wrap(CodeDependency, "级联释放过期订单锁失败", err)
 		}
@@ -780,8 +784,13 @@ func (s *OrderService) ExpireOrders(ctx context.Context) (int, error) {
 		if err != nil && !errors.Is(err, port.ErrNotFound) {
 			return wrap(CodeDependency, "读取订单超时设置失败", err)
 		}
-		cutoff := now.Add(-time.Duration(closeMinutes(rawCloseMinutes)) * time.Minute)
-		c, err := closeExpiredBatch(txCtx, s.orders, s.priceLocks, cutoff, now)
+		windows, err := loadMerchantCloseWindows(txCtx, s.merchants)
+		if err != nil {
+			return wrap(CodeDependency, "读取商户关单窗口失败", err)
+		}
+		globalMinutes := closeMinutes(rawCloseMinutes)
+		cutoff := now.Add(-time.Duration(globalMinutes) * time.Minute)
+		c, err := closeExpiredBatch(txCtx, s.orders, s.priceLocks, cutoff, now, globalMinutes, windows)
 		closed = c
 		return err
 	})

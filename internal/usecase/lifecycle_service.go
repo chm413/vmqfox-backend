@@ -25,6 +25,8 @@ type LifecycleServiceDeps struct {
 	Events    port.PaymentEventRepository
 	Outbox    port.OutboxRepository
 	Retention time.Duration
+	// Merchants 用于按商户配置的关单窗口判定过期；为 nil 时全部回落全局 settings.close。
+	Merchants port.MerchantRepository
 }
 
 type LifecycleStats struct {
@@ -43,6 +45,7 @@ type LifecycleService struct {
 	events       port.PaymentEventRepository
 	outbox       port.OutboxRepository
 	retention    time.Duration
+	merchants    port.MerchantRepository
 
 	pruneMu   sync.Mutex
 	lastPrune time.Time
@@ -61,6 +64,7 @@ func NewLifecycleService(deps LifecycleServiceDeps) (*LifecycleService, error) {
 		events:       deps.Events,
 		outbox:       deps.Outbox,
 		retention:    deps.Retention,
+		merchants:    deps.Merchants,
 	}, nil
 }
 
@@ -135,8 +139,13 @@ func (s *LifecycleService) closeExpiredOrders(ctx context.Context, now time.Time
 		if err != nil && !errors.Is(err, port.ErrNotFound) {
 			return wrap(CodeDependency, "读取订单超时设置失败", err)
 		}
-		cutoff := now.Add(-time.Duration(closeMinutes(rawCloseMinutes)) * time.Minute)
-		c, err := closeExpiredBatch(txCtx, s.orders, s.priceLocks, cutoff, now)
+		windows, err := loadMerchantCloseWindows(txCtx, s.merchants)
+		if err != nil {
+			return wrap(CodeDependency, "读取商户关单窗口失败", err)
+		}
+		globalMinutes := closeMinutes(rawCloseMinutes)
+		cutoff := now.Add(-time.Duration(globalMinutes) * time.Minute)
+		c, err := closeExpiredBatch(txCtx, s.orders, s.priceLocks, cutoff, now, globalMinutes, windows)
 		closed = c
 		return err
 	})

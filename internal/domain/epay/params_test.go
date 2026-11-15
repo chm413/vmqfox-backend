@@ -2,6 +2,7 @@ package epay
 
 import (
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -122,11 +123,14 @@ func TestRejectAmbiguous(t *testing.T) {
 	}
 
 	invalid := []map[string]string{
-		{"param": "a&b"},                  // 值含 &
-		{"a=b": "1"},                      // 名含 =
-		{"a&b": "1"},                      // 名含 &
-		{"param": "a\x00b"},               // 值含 NUL
-		{"pid": "M1", "name": "x&pid=M2"}, // 值里塞第二条参数
+		{"a=b": "1"},        // 名含 =
+		{"a&b": "1"},        // 名含 &
+		{"param": "a\x00b"}, // 值含 NUL
+		// 值里的 '&' 必须拒：CanonicalV1 对解码后的值不是单射，
+		// {a:"1&b=2"} 与 {a:"1",b:"2"} 会拼出同一个待签串、同一个 MD5。
+		// 代价是带多 query 的 notify_url 无法接入（已知限制，见设计 §5.5 #11）。
+		{"param": "a&b"},
+		{"notify_url": "https://m.example.com/notify?a=1&b=2"},
 	}
 	for i, params := range invalid {
 		if err := RejectAmbiguous(params); !errors.Is(err, ErrAmbiguousParam) {
@@ -134,21 +138,17 @@ func TestRejectAmbiguous(t *testing.T) {
 		}
 	}
 
-	// 已知取舍（设计 §1）：URL 的 query 里带 & 时，即便商户按 %26 编码，
-	// 解码后的值仍含 &，待签串无法唯一还原参数边界，因此一律拒绝。
-	// 这确实会挡住「回跳地址带多个查询参数」的商户，需要 handler 给出明确文案，
-	// 而不是静默拼出一个可能产生二义性的待签串。
-	if err := RejectAmbiguous(map[string]string{"return_url": "https://m.example.com/r?a=1&b=2"}); !errors.Is(err, ErrAmbiguousParam) {
-		t.Fatalf("值含 & 的 URL 应被拒绝，实际 %v", err)
+	// 决策门闩：值里的 '&' 必须拒（理由见 TestCanonicalV1_RejectsAmpersandInValue：
+	// CanonicalV1 对解码后的值不是单射）。带多个 query 参数的 notify_url 因此无法接入，
+	// 这是已文档化的兼容代价，不是漏判。
+	if err := RejectAmbiguous(map[string]string{"notify_url": "https://m.example.com/r?a=1&b=2"}); !errors.Is(err, ErrAmbiguousParam) {
+		t.Fatalf("值含 & 的 notify_url 必须被拒，实际 %v", err)
 	}
-
-	// 参数走私的具体形态：签名域是解码后的值，而商户侧 PHP 用 $_GET 解析回调串。
-	// 若放开值里的 &，这段在回调串里会被对端拆成顶层 money=1000，而 MD5 仍然对得上。
-	smuggled := map[string]string{
-		"return_url": "https://a.com/r?x=1&money=1000",
-	}
-	if err := RejectAmbiguous(smuggled); !errors.Is(err, ErrAmbiguousParam) {
-		t.Fatalf("参数走私形态必须被拒绝，实际 %v", err)
+	// 出站串由 url.Values.Encode() 生成，值里的 '&' 会编成 %26。
+	// 这条钉住的是「出站走私不是拒绝理由」——真正的理由在签名域，别把两者混谈。
+	encoded := url.Values{"notify_url": {"https://m.example.com/r?a=1&b=2"}}.Encode()
+	if strings.Contains(encoded, "?a=1&b=2") || !strings.Contains(encoded, "%26") {
+		t.Fatalf("出站编码未转义值里的 &：%q", encoded)
 	}
 
 	// 控制字符（0x00–0x1F、0x7F）一律拒绝：CR/LF 是日志注入的基本盘，

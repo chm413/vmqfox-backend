@@ -213,6 +213,8 @@ func New(cfg config.Config, db *gorm.DB, tokenParser *auth.TokenService, logger 
 			Events:       paymentEvents,
 			Outbox:       outbox,
 			Retention:    cfg.Jobs.HistoryRetention,
+			// 关单与过期清理要按商户窗口判定，原生订单仍回落到全局 settings.close。
+			Merchants: merchantRepo,
 		})
 		if serviceErr != nil {
 			return nil, serviceErr

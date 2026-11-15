@@ -115,35 +115,51 @@ func upOrdersMerchantIndex(db *gorm.DB) error {
 	merchantExists := db.Migrator().HasIndex(ordersTable, merchantPayIDIndex)
 	stateExists := db.Migrator().HasIndex(ordersTable, merchantStateIndex)
 
+	statements, err := ordersIndexStatements(legacyExists, merchantExists, stateExists)
+	if err != nil {
+		return err
+	}
+	for _, statement := range statements {
+		if err := db.Exec(statement).Error; err != nil {
+			return fmt.Errorf("执行 orders 索引迁移失败（%s）: %w", statement, err)
+		}
+	}
+	return nil
+}
+
+// ordersIndexStatements 是 orders 索引迁移的全部决策逻辑：只吃「索引在不在」三个布尔量，
+// 返回要按序执行的 DDL。抽成纯函数是为了让「每条分支都补二级索引」这个不变量
+// 在没有 MySQL 的环境里也能被钉住——之前这里的两条分支收尾不一致，
+// 导致「手工提前建过新唯一索引」的库永远缺 idx_orders_merchant_state，而版本号照样被记成已应用。
+func ordersIndexStatements(legacyExists, merchantExists, stateExists bool) ([]string, error) {
 	switch {
 	case merchantExists && !legacyExists:
 		// 正常终态。只剩二级索引缺失（上次执行到一半、DDL 已提交但版本未写入）时单独补齐。
-		if stateExists {
-			return nil
-		}
-		if err := db.Exec("ALTER TABLE " + ordersTable + " ADD KEY " + merchantStateIndex + " (merchant_id, state, created_at)").Error; err != nil {
-			return fmt.Errorf("为 orders 补充 %s 索引失败: %w", merchantStateIndex, err)
-		}
-		return nil
+		return merchantStateIndexStatements(stateExists), nil
 
 	case merchantExists && legacyExists:
 		// 有人手工提前建过新索引：只需摘掉全局唯一索引。
 		// 此时留两套唯一约束会让「跨商户同单号」在运行时被拒，症状极难排查。
-		if err := db.Exec("ALTER TABLE " + ordersTable + " DROP INDEX " + legacyPayIDIndex).Error; err != nil {
-			return fmt.Errorf("删除遗留全局唯一索引 %s 失败: %w", legacyPayIDIndex, err)
-		}
-		return nil
+		// 收尾与上面那条分支保持一致：摘完旧索引同样要保证二级索引在，
+		// 否则这条路径会带着缺陷结构进入「已应用」状态，之后再也不会被修。
+		statements := []string{"ALTER TABLE " + ordersTable + " DROP INDEX " + legacyPayIDIndex}
+		return append(statements, merchantStateIndexStatements(stateExists)...), nil
 
 	case !merchantExists && !legacyExists:
 		// 两个索引都没有：pay_id 完全不受唯一约束保护，不是迁移器该自动猜的状态。
-		return errors.New("orders 上既没有 uq_orders_pay_id 也没有 uq_orders_merchant_pay_id，请人工确认索引状态后再迁移")
+		return nil, errors.New("orders 上既没有 uq_orders_pay_id 也没有 uq_orders_merchant_pay_id，请人工确认索引状态后再迁移")
 	}
 
-	statement := switchIndexStatement(!stateExists)
-	if err := db.Exec(statement).Error; err != nil {
-		return fmt.Errorf("切换 orders 唯一索引为 (merchant_id, pay_id) 失败: %w", err)
+	return []string{switchIndexStatement(!stateExists)}, nil
+}
+
+// merchantStateIndexStatements 是「二级索引缺了就补」的统一步骤，供上面每条分支共用。
+// 5.7 没有 CREATE INDEX IF NOT EXISTS，只能靠调用方先 HasIndex 探测。
+func merchantStateIndexStatements(stateExists bool) []string {
+	if stateExists {
+		return nil
 	}
-	return nil
+	return []string{"ALTER TABLE " + ordersTable + " ADD KEY " + merchantStateIndex + " (merchant_id, state, created_at)"}
 }
 
 // switchIndexStatement 拼出「DROP 旧唯一索引 + ADD 新唯一索引（+ 二级索引）」的单条 ALTER。

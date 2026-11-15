@@ -690,3 +690,181 @@ func TestEPayCreateRejectsMalformedMoney(t *testing.T) {
 		}
 	}
 }
+
+// racingEPayOrders 模拟「行不存在时两个事务同时穿过幂等检查」：
+// FindByPayIDForUpdate 如实返回「没查到」（间隙锁互不冲突，两个请求都能过），
+// 后到者到 Create 才撞 uq_orders_merchant_pay_id(1062) 或死锁(1213)。
+type racingEPayOrders struct {
+	*epayV1Orders
+	createErr  error
+	lockMissed int
+	createHits int
+}
+
+func (r *racingEPayOrders) FindByPayIDForUpdate(ctx context.Context, merchantID int64, payID string) (order.Order, error) {
+	r.lockMissed++
+	// 只有第一次穿过去时才「看不到行」，模拟并发窗口；后续调用如实查表。
+	if r.lockMissed == 1 {
+		return order.Order{}, port.ErrNotFound
+	}
+	return r.epayV1Orders.FindByPayIDForUpdate(ctx, merchantID, payID)
+}
+
+func (r *racingEPayOrders) Create(context.Context, order.Order) (order.Order, error) {
+	r.createHits++
+	return order.Order{}, r.createErr
+}
+
+// TestEPayCreateReplaysAfterUniqueKeyRace 覆盖并发幂等（设计 §5.4）：
+// 同一 (merchant_id, out_trade_no) 的两个请求同时穿过检查时，后到者必须回放
+// **同一个 payurl**，而不是把「创建冲突」交给商户（商户会据此认为下单失败，
+// 而用户可能已经付了钱），也不得重新占一次金额锁。
+func TestEPayCreateReplaysAfterUniqueKeyRace(t *testing.T) {
+	service, env := epayV1TestService(t, nil)
+	env.qrcodes.exact[1250] = "https://qr.test/1250"
+
+	winner := order.Order{
+		ID:          77,
+		MerchantID:  testMerchantID,
+		Protocol:    merchant.ProtocolEPayV1,
+		OrderID:     "20261112000003",
+		PublicToken: testToken(9),
+		PayID:       "ORDER-RACE",
+		Type:        payment.Alipay,
+		PriceCents:  1250,
+		PriceText:   "12.50",
+		State:       order.StatusPending,
+		PayURL:      "https://qr.test/1250",
+	}
+	// 赢家已提交：出事务后的重查能读到它。
+	env.orders.byKey[epayOrderKey(testMerchantID, "ORDER-RACE")] = winner
+
+	racing := &racingEPayOrders{epayV1Orders: env.orders, createErr: port.ErrConflict}
+	service.orderRepo = racing
+
+	result, err := service.Create(context.Background(), epayV1Input("ORDER-RACE", "12.50"))
+	if err != nil {
+		t.Fatalf("撞唯一索引后应回放原订单，实际 err=%v", err)
+	}
+	if racing.createHits != 1 {
+		t.Fatalf("应只尝试写库一次，实际 %d 次", racing.createHits)
+	}
+	if result.TradeNo != winner.OrderID {
+		t.Fatalf("应回放赢家的 trade_no %q，实际 %q", winner.OrderID, result.TradeNo)
+	}
+	if result.PayURL != "https://pay.example.test/#/payment/"+winner.PublicToken {
+		t.Fatalf("应回放赢家的 payurl，实际 %q", result.PayURL)
+	}
+	if result.Qrcode != winner.PayURL {
+		t.Fatalf("应回放赢家的 qrcode，实际 %q", result.Qrcode)
+	}
+	// 只允许「本次请求自己的那一次」占锁：回放绝不能再 acquirePrice，
+	// 否则会撞 uq_price_locks_order_id 并推进到下一个候选金额（金额漂移）。
+	if len(env.locks.attempts) != 1 || env.locks.attempts[0] != 1250 {
+		t.Fatalf("回放不得重新占锁，实际占锁尝试 %v", env.locks.attempts)
+	}
+}
+
+// TestEPayCreateRejectsConflictReplayWithDifferentMoney：并发回放同样绝不静默改价。
+func TestEPayCreateRejectsConflictReplayWithDifferentMoney(t *testing.T) {
+	service, env := epayV1TestService(t, nil)
+	env.qrcodes.exact[1300] = "https://qr.test/1300"
+
+	env.orders.byKey[epayOrderKey(testMerchantID, "ORDER-RACE-2")] = order.Order{
+		MerchantID: testMerchantID,
+		OrderID:    "20261112000004",
+		PayID:      "ORDER-RACE-2",
+		Type:       payment.Alipay,
+		PriceCents: 1250,
+		State:      order.StatusPending,
+	}
+	service.orderRepo = &racingEPayOrders{epayV1Orders: env.orders, createErr: port.ErrConflict}
+
+	_, err := service.Create(context.Background(), epayV1Input("ORDER-RACE-2", "13.00"))
+	if code, _ := ErrorCodeOf(err); code != CodeDuplicateOrder {
+		t.Fatalf("金额不一致应返回 CodeDuplicateOrder，实际 code=%v err=%v", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "金额不一致") {
+		t.Fatalf("文案应说明「商户订单号已存在且金额不一致」，实际 %v", err)
+	}
+}
+
+// TestEPayCreateKeepsOriginalErrorWhenConflictIsNotReplayable：
+// 重查查不到（撞的不是同一笔订单，例如 order_id 撞车）时必须上抛原错误，
+// 不能把「冲突」笼统变成回放，也不能吞掉。
+func TestEPayCreateKeepsOriginalErrorWhenConflictIsNotReplayable(t *testing.T) {
+	service, env := epayV1TestService(t, nil)
+	env.qrcodes.exact[1250] = "https://qr.test/1250"
+	service.orderRepo = &racingEPayOrders{epayV1Orders: env.orders, createErr: port.ErrConflict}
+
+	_, err := service.Create(context.Background(), epayV1Input("ORDER-RACE-3", "12.50"))
+	if code, _ := ErrorCodeOf(err); code != CodeConflict {
+		t.Fatalf("查不到同商户同单号时应保留 CodeConflict，实际 code=%v err=%v", code, err)
+	}
+
+	// 死锁(1213) 在适配层不是 ErrConflict：重查同样查不到时，必须仍按原口径
+	// 报「创建订单失败」的依赖错误，而不是退化成「冲突」或「成功」。
+	env.qrcodes.exact[1250] = "https://qr.test/1250"
+	service.orderRepo = &racingEPayOrders{
+		epayV1Orders: env.orders,
+		createErr:    errors.New("Error 1213 (40001): Deadlock found when trying to get lock"),
+	}
+	_, err = service.Create(context.Background(), epayV1Input("ORDER-RACE-4", "12.50"))
+	if code, _ := ErrorCodeOf(err); code != CodeDependency {
+		t.Fatalf("死锁且查不到时应返回 CodeDependency，实际 code=%v err=%v", code, err)
+	}
+	if !strings.Contains(err.Error(), "创建订单失败") {
+		t.Fatalf("文案应保留「创建订单失败」，实际 %v", err)
+	}
+}
+
+// TestEPayAuthenticateHidesKeyChainFailure 覆盖安全审计 P3：
+// 「密钥链路坏了」不得成为设计 §5.4 错误码表之外的第 4 个可区分状态 ——
+// 否则未鉴权者拿一个存在的 pid 发一次请求，就能判断「商户存在但密钥坏了」。
+// 对外必须与真正的验签失败同码同文案；「该商户未开通 V1 接口」保持不变（那是设计允许的状态）。
+func TestEPayAuthenticateHidesKeyChainFailure(t *testing.T) {
+	sign := "00000000000000000000000000000000"
+	params := map[string]string{"pid": testMerchantNo, "sign": sign}
+	slot := epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV1)
+
+	// 情形 1：未配主密钥（部署配置问题）。
+	service, _ := epayV1TestService(t, nil)
+	service.masterKeys = nil
+	assertSignatureError(t, service, params, "未配主密钥")
+
+	// 情形 2：密文解不开（换过 master key 版本后的典型形态）。
+	service, env := epayV1TestService(t, nil)
+	broken := env.keys.active[slot]
+	broken.SecretCipher = []byte("not-a-valid-ciphertext")
+	env.keys.verify[slot] = []merchant.Key{broken}
+	assertSignatureError(t, service, params, "密文解不开")
+
+	// 情形 3：解密成功但明文不符合密钥格式（编码/截断 bug）。
+	service, env = epayV1TestService(t, nil)
+	invalid := env.keys.active[slot]
+	invalid.SecretCipher, invalid.SecretNonce, invalid.KeyVersion, _ = env.box.Seal([]byte("too-short-key"), invalid.AAD())
+	env.keys.verify[slot] = []merchant.Key{invalid}
+	assertSignatureError(t, service, params, "密钥格式无效")
+
+	// 对照：该商户确实没有 V1 密钥行 == 未开通，仍是设计允许的对外状态。
+	service, _ = epayV1TestService(t, nil)
+	service.merchantKeys = epayV1Keys{verify: map[string][]merchant.Key{}}
+	_, err := service.Authenticate(context.Background(), params)
+	if code, _ := ErrorCodeOf(err); code != CodeConfiguration {
+		t.Fatalf("未开通 V1 应保留 CodeConfiguration，实际 code=%v err=%v", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "未开通 V1 接口") {
+		t.Fatalf("未开通 V1 的文案应保持不变，实际 %v", err)
+	}
+}
+
+func assertSignatureError(t *testing.T, service *EPayService, params map[string]string, scene string) {
+	t.Helper()
+	_, err := service.Authenticate(context.Background(), params)
+	if code, _ := ErrorCodeOf(err); code != CodeInvalidSignature {
+		t.Fatalf("%s：对外必须是 CodeInvalidSignature，实际 code=%v err=%v", scene, code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "签名错误") {
+		t.Fatalf("%s：对外文案必须是「签名错误」，实际 %v", scene, err)
+	}
+}

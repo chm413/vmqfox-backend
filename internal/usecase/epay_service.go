@@ -3,7 +3,10 @@ package usecase
 import (
 	"context"
 	"errors"
+	"log"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/epay"
@@ -112,6 +115,11 @@ type EPayService struct {
 	merchantKeys port.MerchantKeyRepository
 	masterKeys   *secret.Box
 	notifyURLs   NotifyURLValidator
+
+	// keyChainWarned 记录「哪些商户的密钥链路故障已经打过日志」。
+	// 只用于日志限流，不参与任何业务判断：Authenticate 在未鉴权入口上，
+	// 逐请求打印等于给探测者一个刷日志的放大器。
+	keyChainWarned sync.Map
 }
 
 func NewEPayService(deps EPayServiceDeps) (*EPayService, error) {
@@ -179,49 +187,31 @@ func (s *EPayService) Authenticate(ctx context.Context, params map[string]string
 	return merchant.Merchant{}, fail(CodeInvalidSignature, "签名错误")
 }
 
-// v1Secret 取出并解密该商户当前代的 V1 共享密钥。
-// 解密后立刻校验长度与字符集：任何编码/截断 bug 必须在解密点暴露，
-// 否则只会在验签阶段表现为「签名错误」，把排查方向引向密钥配错。
-func (s *EPayService) v1Secret(ctx context.Context, value merchant.Merchant) (string, error) {
-	key, err := s.merchantKeys.FindActive(ctx, value.ID, merchant.ProtocolEPayV1)
-	if errors.Is(err, port.ErrNotFound) {
-		// 没有当前代密钥 == 该协议未开通（密钥本身就是开通凭据）。
-		return "", fail(CodeConfiguration, "该商户未开通 V1 接口")
-	}
-	if err != nil {
-		return "", wrap(CodeDependency, "读取商户密钥失败", err)
-	}
-	if s.masterKeys == nil {
-		// 未配主密钥时绝不退化为「跳过验签」：那等于任何人可伪造任意商户下单。
-		return "", fail(CodeConfiguration, "商户密钥不可用")
-	}
-
-	plain, err := s.masterKeys.Open(key.SecretCipher, key.SecretNonce, key.AAD(), key.KeyVersion)
-	if err != nil {
-		return "", wrap(CodeConfiguration, "商户密钥不可用", err)
-	}
-	secretText := string(plain)
-	if !merchant.IsValidV1Secret(secretText) {
-		return "", fail(CodeConfiguration, "商户密钥格式无效")
-	}
-	return secretText, nil
-}
-
 // v1SecretsForVerify 取出该商户 V1 的全部可验签密钥（当前代在前、上一代在后）。
 //
-// 与 v1Secret 的分工：v1Secret 只取当前代，用于我方发起签名（下单/回调）；
-// 这里用于验签（商户发起），轮换期必须两代都认——商户换 key 需要时间，
+// 用途只有一个：验签（商户发起签名）。轮换期必须两代都认——商户换 key 需要时间，
 // 只认当前代会让窗口内所有请求报「签名错误」，而真正原因只是密钥没换完。
+//
+// 对外文案收敛（安全审计 P3，设计 §5.4 错误码表之外不留第 4 个可区分状态）：
+// 「密钥链路坏了」（未配主密钥、密文解不开、明文格式非法）对外一律与真正的验签失败
+// 同码同文案 `invalid_signature / 签名错误`。否则未鉴权者只要拿一个存在的 pid 发一次
+// 请求，就能区分「商户存在但密钥链路坏了」与「签名不对」，把错误码表变成探测面。
+// 真实原因只落内部日志（带 merchant_id 与 cause），排障靠日志不靠响应。
+// 「该商户未开通 V1 接口」保持不变：那是设计明确允许的对外状态，且与「密钥损坏」是
+// 两件事——前者是商户还没开通，后者是我方数据/配置坏了。
 func (s *EPayService) v1SecretsForVerify(ctx context.Context, value merchant.Merchant) ([]string, error) {
 	keys, err := s.merchantKeys.FindAllForVerify(ctx, value.ID, merchant.ProtocolEPayV1)
 	if err != nil {
 		return nil, wrap(CodeDependency, "读取商户密钥失败", err)
 	}
 	if len(keys) == 0 {
+		// 没有密钥行 == 该协议未开通（密钥本身就是开通凭据）。
 		return nil, fail(CodeConfiguration, "该商户未开通 V1 接口")
 	}
 	if s.masterKeys == nil {
-		return nil, fail(CodeConfiguration, "商户密钥不可用")
+		// 未配主密钥时绝不退化为「跳过验签」：那等于任何人可伪造任意商户下单。
+		s.warnKeyChainOnce(0, "未配置主密钥", nil)
+		return nil, fail(CodeInvalidSignature, "签名错误")
 	}
 
 	secrets := make([]string, 0, len(keys))
@@ -229,18 +219,37 @@ func (s *EPayService) v1SecretsForVerify(ctx context.Context, value merchant.Mer
 		plain, openErr := s.masterKeys.Open(key.SecretCipher, key.SecretNonce, key.AAD(), key.KeyVersion)
 		if openErr != nil {
 			// 两代的 master key 版本可能不同，单代解不开不应拖累另一代。
+			s.warnKeyChainOnce(value.ID, "密钥解密失败 key_version="+strconv.Itoa(key.KeyVersion), openErr)
 			continue
 		}
 		secretText := string(plain)
 		if !merchant.IsValidV1Secret(secretText) {
+			// 编码/截断 bug 必须在解密点暴露，否则只会在验签阶段表现为「签名错误」。
+			s.warnKeyChainOnce(value.ID, "密钥格式无效 key_version="+strconv.Itoa(key.KeyVersion), nil)
 			continue
 		}
 		secrets = append(secrets, secretText)
 	}
 	if len(secrets) == 0 {
-		return nil, fail(CodeConfiguration, "商户密钥不可用")
+		s.warnKeyChainOnce(value.ID, "无可用验签密钥 keys="+strconv.Itoa(len(keys)), nil)
+		return nil, fail(CodeInvalidSignature, "签名错误")
 	}
 	return secrets, nil
+}
+
+// warnKeyChainOnce 按 (merchant_id, 原因类别) 只记一次真实原因。
+//
+// 为什么限流而不是每次都打：Authenticate 在未鉴权入口上，一个探测者循环发请求
+// 就能把日志刷满；而密钥链路故障是**确定性**的（同一商户每次都失败），
+// 记一次足够定位，重复行没有任何排障价值。
+// merchant_id=0 表示与商户无关的全局配置故障（未配主密钥）。
+func (s *EPayService) warnKeyChainOnce(merchantID int64, reason string, cause error) {
+	key := strconv.FormatInt(merchantID, 10) + ":" + reason
+	if _, loaded := s.keyChainWarned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	// 商户号与原因必须同时出现在同一行：只看原因无法判断是哪个商户的密钥坏了。
+	log.Printf("epay.v1 验签密钥链路不可用 merchant_id=%d reason=%s cause=%v", merchantID, reason, cause)
 }
 
 // Create 是 EPay V1 的下单入口。
@@ -346,17 +355,35 @@ func (s *EPayService) Create(ctx context.Context, input EPayCreateInput) (EPayCr
 			if errors.Is(createErr, port.ErrPublicTokenConflict) {
 				return port.ErrPublicTokenConflict
 			}
-			if errors.Is(createErr, port.ErrConflict) {
-				return fail(CodeConflict, "创建订单冲突")
-			}
 			if createErr != nil {
-				return wrap(CodeDependency, "创建订单失败", createErr)
+				// 文案不在这里定：撞 uq_orders_merchant_pay_id(1062) 或死锁(1213) 的常见成因
+				// 是「另一个并发请求刚插入了同一个 (merchant_id, out_trade_no)」，
+				// 必须出事务后重新查一次，命中就回放同一个 payurl（设计 §5.4）。
+				return epayCreateConflict{cause: createErr}
 			}
 			created = persisted
 			return nil
 		})
 		if errors.Is(err, port.ErrPublicTokenConflict) {
 			continue
+		}
+		var conflict epayCreateConflict
+		if errors.As(err, &conflict) {
+			// 并发幂等：行不存在时两个事务的间隙锁互不冲突，都能穿过上面的
+			// FindByPayIDForUpdate 检查，后到者只会在写库时撞唯一索引/死锁。
+			// 此时在同一请求内重查一次，命中则回放，**不再占一次金额锁**。
+			replayedOrder, found, replayErr := s.replayAfterCreateConflict(ctx, input, paymentType, priceCents)
+			if replayErr != nil {
+				return EPayCreateResult{}, replayErr
+			}
+			if found {
+				return s.resultOf(replayedOrder), nil
+			}
+			// 查不到：真的不是同一笔订单，按原错误上抛（唯一索引 → 冲突，其余 → 依赖失败）。
+			if errors.Is(conflict.cause, port.ErrConflict) {
+				return EPayCreateResult{}, fail(CodeConflict, "创建订单冲突")
+			}
+			return EPayCreateResult{}, wrap(CodeDependency, "创建订单失败", conflict.cause)
 		}
 		if err != nil {
 			return EPayCreateResult{}, err
@@ -478,6 +505,58 @@ func validateEPayCreateInput(input EPayCreateInput) (payment.Type, int64, error)
 		return 0, 0, fail(CodeInvalidArgument, "return_url 只允许 http/https 地址")
 	}
 	return paymentType, priceCents, nil
+}
+
+// epayCreateConflict 标记「写订单失败」这一具体来源，供出事务后做并发回放。
+//
+// 为什么不直接返回 port.ErrConflict：唯一索引冲突只是「可能是同一笔订单」的线索，
+// 还要区分「撞的是 uq_orders_merchant_pay_id」与「撞的是 order_id/public_token 之外的
+// 唯一键」，而这两类的最终文案不同（CodeConflict 与 CodeDependency）。
+// 真正的判据不是错误码，而是「重查能否查到同一笔订单」。
+type epayCreateConflict struct{ cause error }
+
+func (e epayCreateConflict) Error() string { return "创建订单失败: " + e.cause.Error() }
+
+func (e epayCreateConflict) Unwrap() error { return e.cause }
+
+const (
+	// epayConflictReplayAttempts/Delay 控制「撞冲突后重查」的重试：
+	// 死锁(1213)时赢家事务可能尚未提交，立刻查会查不到，极短重试即可覆盖
+	// （MySQL 的 1062 只会在对方提交后返回，因此 1062 路径一次就够）。
+	epayConflictReplayAttempts = 3
+	epayConflictReplayDelay    = 10 * time.Millisecond
+)
+
+// replayAfterCreateConflict 在写库撞唯一索引(1062)/死锁(1213)后，于同一请求内
+// 重新按 (merchant_id, out_trade_no) 查一次：命中且金额/类型一致就回放原订单。
+//
+// 为什么不在事务里重查：事务已经回滚，锁也随回滚释放；在**新**的读里才能看到
+// 赢家事务提交的行。整个过程不碰 price_locks —— 回放绝不能重新 acquirePrice
+// （会撞 uq_price_locks_order_id 并推进到下一个候选金额，导致金额漂移）。
+func (s *EPayService) replayAfterCreateConflict(
+	ctx context.Context,
+	input EPayCreateInput,
+	paymentType payment.Type,
+	priceCents int64,
+) (order.Order, bool, error) {
+	for attempt := 0; ; attempt++ {
+		existing, err := s.orderRepo.FindByPayID(ctx, input.MerchantID, input.OutTradeNo)
+		switch {
+		case err == nil:
+			// 金额或类型不一致时 checkEPayReplay 会明确拒绝：绝不静默按旧金额回放（等于替商户改价）。
+			if matchErr := checkEPayReplay(existing, paymentType, priceCents); matchErr != nil {
+				return order.Order{}, false, matchErr
+			}
+			return existing, true, nil
+		case errors.Is(err, port.ErrNotFound):
+			if attempt+1 >= epayConflictReplayAttempts {
+				return order.Order{}, false, nil
+			}
+			time.Sleep(epayConflictReplayDelay)
+		default:
+			return order.Order{}, false, wrap(CodeDependency, "查询订单失败", err)
+		}
+	}
 }
 
 // checkEPayReplay 校验幂等命中的订单是否与本次请求一致。

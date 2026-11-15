@@ -13,9 +13,10 @@ var (
 	ErrSignature = errors.New("签名错误")
 
 	// ErrAmbiguousParam 参数含歧义分隔符或控制字符，导致待签串无法唯一还原参数边界。
-	// 这属于给签名伪造开口子的输入（参数走私可改写金额），必须在入口直接拒绝（设计 §1）。
-	// 触发条件分两类，共用同一个哨兵：分隔符（名含 '='/'&'、值含 '&'）与
-	// 控制字符（名或值含 C0 0x00–0x1F / DEL 0x7F，见 params.go 的 hasControlByte）。
+	// 这属于给签名伪造开口子的输入，必须在入口直接拒绝（设计 §1）。
+	// 触发条件分两类，共用同一个哨兵：分隔符（**名**含 '='/'&'，值里的 '&' 已放行，
+	// 见 params.go 的 RejectAmbiguous）与控制字符（名或值含 C0 0x00–0x1F / DEL 0x7F，
+	// 见 params.go 的 hasControlByte）。
 	// 对外必须与 ErrSignature 表现完全一致（同样 code=-1 一句话、同样耗时特征），
 	// 否则会成为区分「参数有问题」与「密钥不对」的探针；内部日志分开记，且不得打印 key/sign 原文。
 	ErrAmbiguousParam = errors.New("参数含歧义分隔符或控制字符")

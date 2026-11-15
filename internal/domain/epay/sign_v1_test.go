@@ -36,6 +36,17 @@ const goldenZeroCanonical = "money=0.00&name=测试商品&notify_url=https://m.e
 
 const goldenZeroSign = "da925ce317b29493d22c7342ec358291"
 
+// 关于「值里带 '&'」：本网关拒绝，理由不是洁癖，而是 CanonicalV1 对解码后的值
+// 不是单射。构造两组语义不同的参数：
+//
+//	{a: "1&b=2"}      →  "a=1&b=2" + key  →  md5
+//	{a: "1", b: "2"}  →  "a=1&b=2" + key  →  同一个 md5
+//
+// 同一个签名因此覆盖了两个参数集合；再叠加「Go map 拒重复键、PHP $_GET 取最后一个」
+// 的解析差异，就是签名移植原语。这发生在签名域构造阶段，与出站是否 urlencode 无关，
+// 所以 notify_url / return_url 也无法豁免——它们都在 V1 签名域内。
+// 代价：带多个查询参数的 notify_url 无法接入（已知限制，替代方案见设计 §5.5 #11）。
+
 // 附录 A「回调签发用例」：已支付订单的回调参数。同为命令行独立算出：
 //
 //	printf '%s' '<goldenCallbackCanonical><goldenKey>' | openssl md5
@@ -83,6 +94,33 @@ func TestCanonicalV1_Golden(t *testing.T) {
 	}
 	if !strings.HasPrefix(goldenMerchantNo, "M") {
 		t.Fatalf("merchant_no 必须以 M 开头，实际 %q", goldenMerchantNo)
+	}
+}
+
+func TestCanonicalV1_RejectsAmpersandInValue(t *testing.T) {
+	// 值里的 '&' 必须拒（见文件上方常量区的非单射说明）。
+	// 这条用例是「决策门闩」：谁想放开，先得把它改掉并解释为什么签名不会再歧义。
+	params := goldenParams()
+	params["notify_url"] = "https://m.example.com/notify?a=1&b=2"
+	if _, err := CanonicalV1(params); !errors.Is(err, ErrAmbiguousParam) {
+		t.Fatalf("notify_url 含 & 应判为歧义，实际 %v", err)
+	}
+	if _, err := SignV1(params, goldenKey); !errors.Is(err, ErrAmbiguousParam) {
+		t.Fatalf("SignV1 也应拒绝含 & 的值，实际 %v", err)
+	}
+
+	// param 会被原样回显进回调体，同样在拒绝范围内。
+	withParam := goldenParams()
+	withParam["param"] = "a=1&money=1000"
+	if _, err := CanonicalV1(withParam); !errors.Is(err, ErrAmbiguousParam) {
+		t.Fatalf("param 含 & 应判为歧义，实际 %v", err)
+	}
+
+	// 参数名里带 & 或 = 同样破坏边界，一并拒绝。
+	badName := goldenParams()
+	badName["a=b"] = "1"
+	if _, err := CanonicalV1(badName); !errors.Is(err, ErrAmbiguousParam) {
+		t.Fatalf("参数名含 = 应判为歧义，实际 %v", err)
 	}
 }
 
@@ -233,7 +271,6 @@ func TestSignV1_Ambiguous(t *testing.T) {
 		name   string
 		mutate func(map[string]string)
 	}{
-		{"值含 &", func(params map[string]string) { params["param"] = "a&b" }},
 		{"参数名含 =", func(params map[string]string) { params["a=b"] = "1" }},
 		{"参数名含 &", func(params map[string]string) { params["a&b"] = "1" }},
 		{"值含 NUL", func(params map[string]string) { params["param"] = "a\x00b" }},
@@ -262,6 +299,13 @@ func TestSignV1_Ambiguous(t *testing.T) {
 	allowed["return_url"] = "https://m.example.com/return?a=1"
 	if _, err := CanonicalV1(allowed); err != nil {
 		t.Fatalf("值含 '=' 不应被拒绝，实际 %v", err)
+	}
+	// 值含 '&' 必须拒：CanonicalV1 对解码后的值不是单射（见文件上方常量区说明），
+	// 放行会让一个合法签名同时授权两条不同记录。
+	amp := goldenParams()
+	amp["param"] = "a&b"
+	if _, err := CanonicalV1(amp); !errors.Is(err, ErrAmbiguousParam) {
+		t.Fatalf("值含 '&' 应判为歧义，实际 %v", err)
 	}
 
 	// 同名参数出现两次无法用 map 表达（Go map 天然去重），因此这一项无法在本层测到：

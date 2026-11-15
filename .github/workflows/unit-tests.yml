@@ -1,0 +1,70 @@
+name: Unit tests
+
+# 为什么需要这个 workflow：build-and-release.yml 是 workflow_dispatch 专用（还要填 tag_name），
+# 意味着单元用例只在人工发版时才跑——门禁的结论永远晚于合并动作，红灯只是把假绿从
+# 「没人跑」挪到了「发版时才发现」。这里挂 pull_request + push(main)，才真正卡住合并。
+#
+# 为什么单独一个文件而不是并进 mysql-integration.yml：那边要起 MySQL 服务容器、跑迁移用例，
+# 耗时与失败面都大得多；把无外部依赖的 252 条单元用例挂在同一个 job 里，会让一次 DB 环境
+# 抖动连带把「代码本身是不是坏的」这个结论一起污染掉。两个门禁红因不同，就该分开呈现。
+#
+# 本文件不设 DSN：14 条 MySQL 用例会按既有约定 SKIP，其余用例必须全绿。
+# 也正因此这里不设 continue-on-error——单元用例是纯本地逻辑，没有任何环境理由可以变红。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # 保留手动触发，便于排查历史提交或临时复跑，无需推新 commit。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一 ref 连推时取消排队中的旧运行：否则过期提交的绿结论会覆盖最新提交的红结论，
+# 让人误以为当前 HEAD 是干净的。
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: go vet + go test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # 卡死保护：单元用例正常几十秒内跑完，占用 runner 上限数小时说明是死锁或网络挂起。
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      # 用 go-version-file 而不是 env 常量：工具链版本只在 go.mod 里维护一份，
+      # 避免「改了 go.mod 的 go 指令，但工作流还钉着旧版本」这种只在 CI 上炸的漂移。
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # vet 先跑：编译与静态问题应该单独呈现，不必等全套用例跑完才暴露。
+      - name: go vet
+        run: go vet ./...
+
+      # 不加 -run 过滤：本仓库用例命名并不齐整，任何看似合理的正则会静默漏跑一半用例，
+      # 那正是本门禁要消灭的假绿。整包跑代价很小。
+      # 加 -count=1 关掉结果缓存，否则「本地跑过」会让 CI 直接复用缓存、等于没跑。
+      # 不加 -shuffle / t.Parallel：部分包共享包级状态，保持与本地一致的确定性。
+      - name: go test
+        run: |
+          set +e
+          go test ./... -count=1 2>&1 | tee /tmp/unit-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # 公开仓库的 run logs 需要 admin 权限才能下载，而 check-run annotation 匿名可读。
+            # 把失败行折叠成 annotation，是这条流水线唯一不需要凭据的排障通道。
+            grep -E -- "--- FAIL|_test\.go:[0-9]+:|^FAIL|panic:|build failed" /tmp/unit-test.log \
+              | tail -n 25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit "$status"

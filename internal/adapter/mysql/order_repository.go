@@ -244,8 +244,11 @@ func (r *OrderRepository) DeleteBefore(ctx context.Context, before time.Time) (i
 }
 
 func (r *OrderRepository) DeleteExpiredBefore(ctx context.Context, before time.Time) (int64, error) {
+	// 只删已关闭的历史单，不删 pending：EPay 商户的支付窗口可能远大于全局窗口，
+	// 按全局 cutoff 直接删会把仍在有效期内、还能付款的订单删掉。
+	// pending 单由关单任务按各自窗口关闭后，才进入这里的清理范围。
 	result := databaseFromContext(ctx, r.db).
-		Where("created_at < ? AND state IN (?, ?)", before, int(order.StatusPending), int(order.StatusClosed)).
+		Where("created_at < ? AND state = ?", before, int(order.StatusClosed)).
 		Delete(&OrderRow{})
 	return result.RowsAffected, result.Error
 }

@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,72 @@ func merchantKeyPrimaryKey(t *testing.T, db *gorm.DB) string {
 		result += column
 	}
 	return result
+}
+
+// TestOrdersIndexStatementsEnsureStateIndex 不连库，钉住「每条分支收尾都要保证二级索引在」。
+//
+// 回归点：「两套索引都在」这条分支曾经只 DROP 旧索引就 return，不再补
+// idx_orders_merchant_state，而版本号照样被记成已应用——该索引从此永不创建，
+// 运营查询「某商户的待支付订单」退化为全表扫描，且没有任何报错。
+func TestOrdersIndexStatementsEnsureStateIndex(t *testing.T) {
+	const (
+		dropLegacy      = "ALTER TABLE orders DROP INDEX uq_orders_pay_id"
+		addState        = "ALTER TABLE orders ADD KEY idx_orders_merchant_state (merchant_id, state, created_at)"
+		switchOnly      = "ALTER TABLE orders DROP INDEX uq_orders_pay_id, ADD UNIQUE KEY uq_orders_merchant_pay_id (merchant_id, pay_id)"
+		switchPlusState = switchOnly + ", ADD KEY idx_orders_merchant_state (merchant_id, state, created_at)"
+	)
+
+	cases := []struct {
+		name                                      string
+		legacyExists, merchantExists, stateExists bool
+		want                                      []string
+	}{
+		{"两套都在且缺二级索引", true, true, false, []string{dropLegacy, addState}},
+		{"两套都在且二级索引也在", true, true, true, []string{dropLegacy}},
+		{"已收敛但缺二级索引", false, true, false, []string{addState}},
+		{"已收敛且结构完整", false, true, true, nil},
+		{"旧索引独在且缺二级索引", true, false, false, []string{switchPlusState}},
+		{"旧索引独在且二级索引也在", true, false, true, []string{switchOnly}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := ordersIndexStatements(testCase.legacyExists, testCase.merchantExists, testCase.stateExists)
+			if err != nil {
+				t.Fatalf("不应报错，实际 %v", err)
+			}
+			if len(got) != len(testCase.want) {
+				t.Fatalf("语句条数不符:\n got: %v\nwant: %v", got, testCase.want)
+			}
+			for index := range testCase.want {
+				if got[index] != testCase.want[index] {
+					t.Fatalf("第 %d 条语句不符:\n got: %s\nwant: %s", index, got[index], testCase.want[index])
+				}
+			}
+		})
+	}
+
+	// 不变量：只要还没建二级索引，任何一条非报错分支都必须产出补建语句。
+	for _, testCase := range cases {
+		got, err := ordersIndexStatements(testCase.legacyExists, testCase.merchantExists, testCase.stateExists)
+		if err != nil || testCase.stateExists {
+			continue
+		}
+		found := false
+		for _, statement := range got {
+			if strings.Contains(statement, merchantStateIndex) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s：缺 %s 却没有补建语句: %v", testCase.name, merchantStateIndex, got)
+		}
+	}
+
+	// 两个唯一索引都不在时必须报错：迁移器不该替人猜这种状态。
+	if _, err := ordersIndexStatements(false, false, false); err == nil {
+		t.Fatal("两个唯一索引都不在时应报错")
+	}
 }
 
 // TestMigrationAppliesAndIsIdempotent 覆盖「首次应用建表」与「重复执行无副作用」。

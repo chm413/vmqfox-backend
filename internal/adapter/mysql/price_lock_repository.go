@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hulisang/vmqfox-backend/internal/domain/order"
 	"github.com/hulisang/vmqfox-backend/internal/domain/payment"
 	"github.com/hulisang/vmqfox-backend/internal/port"
 	"gorm.io/gorm"
@@ -43,9 +44,12 @@ func (r *PriceLockRepository) ReleaseByOrderID(ctx context.Context, orderID stri
 // 旧实现按 price_locks.created_at 释放，与「按 orders.created_at 删除」是两套判定，
 // 时间基准或窗口一旦不一致就会留下没有订单的孤儿锁，把金额永久占死。
 func (r *PriceLockRepository) ReleaseByOrdersBefore(ctx context.Context, before time.Time) error {
+	// 只释放已离开 pending 的订单锁。仍在支付窗口内的订单（EPay 商户可能 30 分钟，
+	// 而这里的 cutoff 用的是全局 settings.close）如果把锁删掉，同一金额会被新订单
+	// 再次占用，而原单仍可支付——同一份金额卖两次。
 	return databaseFromContext(ctx, r.db).Exec(
-		"DELETE pl FROM price_locks pl JOIN orders o ON o.order_id = pl.order_id WHERE o.created_at < ?",
-		before,
+		"DELETE pl FROM price_locks pl JOIN orders o ON o.order_id = pl.order_id WHERE o.created_at < ? AND o.state <> ?",
+		before, int(order.StatusPending),
 	).Error
 }
 
