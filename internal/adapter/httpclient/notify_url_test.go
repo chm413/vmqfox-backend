@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/hulisang/vmqfox-backend/internal/config"
+	"github.com/hulisang/vmqfox-backend/internal/port"
 )
 
 // notifyURLResolve 描述一次被注入的 DNS 解析结果。
@@ -468,5 +473,30 @@ func TestNotifyURLPolicyMatchesFreeFunction(t *testing.T) {
 	allowPolicy := NotifyURLPolicy{AllowHTTP: true}
 	if err := allowPolicy.ValidateNotifyURL("http://notify.example.com/epay"); err != nil {
 		t.Fatalf("AllowHTTP=true 的 Policy 应放行 http，实际被拒: %v", err)
+	}
+}
+
+// TestNotifierGuardsInjectedClient 守住最容易失效的一处 API 形状：
+// NewNotifier 允许传入自定义 *http.Client，早期实现是「传了就直接用」，
+// 于是注入一个 client 就能整体跳过拨号期 SSRF 拦截，只剩预校验。
+// 生产当前传 nil，所以线上安全；但没有用例守住时，这个旁路会在某次重构里悄悄回来。
+func TestNotifierGuardsInjectedClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	notifier := NewNotifier(&http.Client{}, config.OutboundConfig{AllowInsecureHTTP: true})
+	_, err := notifier.Send(context.Background(), port.Notification{
+		OrderID: "oid",
+		URL:     server.URL,
+		Method:  http.MethodPost,
+		Body:    []byte("hello"),
+	})
+	if err == nil {
+		t.Fatal("注入自定义 client 后仍必须拦截回环地址，实际请求被放行")
+	}
+	if !strings.Contains(err.Error(), "SSRF") {
+		t.Fatalf("应返回 SSRF 拦截错误，实际 %v", err)
 	}
 }

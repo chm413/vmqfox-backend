@@ -30,53 +30,67 @@ func NewNotifier(client *http.Client, outboundCfg ...config.OutboundConfig) *Not
 		cfg = outboundCfg[0]
 	}
 
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	// guardedDial 是三层 SSRF 防护里的第三层：拨号前再校验一次解析结果，
+	// 因此即使 ValidateNotifyURL 被绕过、或 DNS 在校验后改指向内网（rebinding），
+	// 这里仍会拒绝。它必须**无条件安装**——一旦允许「传入自定义 client 就跳过」，
+	// 这个 API 的默认安全就会被一次注入悄悄取消，且没有任何信号。
+	guardedDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) == 0 {
+			return nil, errors.New("无法解析目标主机 IP")
+		}
+
+		// 检查解析出的每个 IP 是否安全（防止 DNS Rebinding 逃逸）
+		for _, ipAddr := range ips {
+			if err := checkIPSecurity(ipAddr.IP, cfg); err != nil {
+				return nil, fmt.Errorf("SSRF 拦截: %w", err)
+			}
+		}
+
+		// 使用解析出的首个已校验 IP 建立连接。
+		// TLS 握手仍以请求 URL 中的主机名做 SNI 与证书校验，因此不会削弱 HTTPS 验证。
+		targetAddr := net.JoinHostPort(ips[0].IP.String(), port)
+		return dialer.DialContext(ctx, network, targetAddr)
+	}
+
 	if client == nil {
-		dialer := &net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
-
-		transport := &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				host, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, err
-				}
-
-				ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-				if err != nil {
-					return nil, err
-				}
-				if len(ips) == 0 {
-					return nil, errors.New("无法解析目标主机 IP")
-				}
-
-				// 检查解析出的每个 IP 是否安全（防止 DNS Rebinding 逃逸）
-				for _, ipAddr := range ips {
-					if err := checkIPSecurity(ipAddr.IP, cfg); err != nil {
-						return nil, fmt.Errorf("SSRF 拦截: %w", err)
-					}
-				}
-
-				// 使用解析出的首个已校验 IP 建立连接。
-				// TLS 握手仍以请求 URL 中的主机名做 SNI 与证书校验，因此不会削弱 HTTPS 验证。
-				targetAddr := net.JoinHostPort(ips[0].IP.String(), port)
-				return dialer.DialContext(ctx, network, targetAddr)
-			},
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   5 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
-		}
-
 		client = &http.Client{
-			Transport: transport,
-			Timeout:   10 * time.Second,
+			Transport: &http.Transport{
+				DialContext:           guardedDial,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   5 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				ResponseHeaderTimeout: 10 * time.Second,
+			},
+			Timeout: 10 * time.Second,
 		}
 	} else {
 		clientCopy := *client
+		// 调用方传入的 client 只沿用其超时/连接池等设置，拨号守卫一律重新安装。
+		// 自定义 RoundTripper（非 *http.Transport）无法安全地保留，退回默认 transport：
+		// 宁可丢配置，也不留一条「注入即失效」的旁路。
+		if base, ok := clientCopy.Transport.(*http.Transport); ok && base != nil {
+			cloned := base.Clone()
+			cloned.DialContext = guardedDial
+			clientCopy.Transport = cloned
+		} else {
+			clientCopy.Transport = &http.Transport{DialContext: guardedDial}
+		}
 		client = &clientCopy
 	}
 
