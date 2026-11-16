@@ -184,3 +184,28 @@ func TestCloseExpiredOrdersFallsBackToGlobalWindow(t *testing.T) {
 		t.Fatalf("应按 id=1(EPay,close=0)、id=2(原生) 关闭，实际 %v", repo.closed)
 	}
 }
+
+// TestCloseExpiredOrdersClosesShorterThanGlobalWindow 覆盖第三遍扫描（shortest<global）：
+// 全局 5 分钟、商户 close_minutes=3 的 EPay 单在 4 分钟时（已过商户窗口、未到全局窗口）
+// 必须被关闭。这是三遍扫描里唯一的短窗口分支——审查终验时全库没有任何
+// CloseMinutes<全局 的用例，该分支此前属于「测试死代码」。
+func TestCloseExpiredOrdersClosesShorterThanGlobalWindow(t *testing.T) {
+	const merchantID = int64(15)
+	repo := &windowOrderRepo{rows: []order.Order{
+		windowOrder(1, merchantID, merchant.ProtocolEPayV1, 4*time.Minute), // 3<4<5：商户窗口已过、全局未到
+	}}
+	merchants := &windowMerchants{values: []merchant.Merchant{
+		{ID: merchantID, No: "M0003", Enabled: true, CloseMinutes: 3},
+	}}
+
+	stats, err := windowService(t, repo, merchants, "5").Maintain(context.Background(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("生命周期任务应成功，实际 err=%v", err)
+	}
+	if stats.ClosedOrders != 1 {
+		t.Fatalf("3 分钟窗口的单在 4 分钟时必须被关闭（旧实现会拖到全局 5 分钟），实际关闭 %d 笔（closed=%v）", stats.ClosedOrders, repo.closed)
+	}
+	if len(repo.closed) != 1 || repo.closed[0] != 1 {
+		t.Fatalf("应只关闭 id=1，实际 %v", repo.closed)
+	}
+}
