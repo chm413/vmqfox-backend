@@ -75,6 +75,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY cmd ./cmd
 COPY internal ./internal
+# database 包被 internal/adapter/mysql/migrate.go 引用，其 go:embed 需要
+# migrations/*.sql 与 schema.sql 进入编译单元（.dockerignore 已不再排除 *.sql）。
+COPY database ./database
 
 # 用本次构建的前端资源覆盖仓库中的占位目录，确保 embed 的一定是当前源码产物
 RUN rm -rf internal/http/static/out
