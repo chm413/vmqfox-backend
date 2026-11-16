@@ -500,3 +500,30 @@ func TestNotifierGuardsInjectedClient(t *testing.T) {
 		t.Fatalf("应返回 SSRF 拦截错误，实际 %v", err)
 	}
 }
+
+// TestNotifierStripsDialTLSAndProxyFromInjectedTransport 钉住 Clone 保留字段的清理：
+// net/http 对 https 优先走 DialTLS/DialTLSContext（不清空则守卫根本不会被调用），
+// Proxy 则让守卫校验的是代理 IP 而非真实目标。这两条都是「传入即绕过」的潜伏路径。
+func TestNotifierStripsDialTLSAndProxyFromInjectedTransport(t *testing.T) {
+	injected := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return nil, nil
+		},
+	}
+	notifier := NewNotifier(&http.Client{Transport: injected}, config.OutboundConfig{AllowInsecureHTTP: true})
+
+	cloned, ok := notifier.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport 应被替换为 *http.Transport，实际 %T", notifier.client.Transport)
+	}
+	if cloned.DialContext == nil {
+		t.Fatal("守卫 DialContext 必须已安装")
+	}
+	if cloned.DialTLS != nil || cloned.DialTLSContext != nil {
+		t.Fatal("自定义 TLS 拨号必须被清除，否则 https 请求绕过 SSRF 守卫")
+	}
+	if cloned.Proxy != nil {
+		t.Fatal("Proxy 必须被清除，否则守卫校验的是代理 IP 而非真实目标")
+	}
+}

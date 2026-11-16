@@ -910,6 +910,7 @@ docker-compose.yml / env.example / env.production.example / docs/升级与迁移
 - **P0–P2 已交付**，并通过真实 MySQL 5.7 CI 验证：002/003 迁移、商户与密钥管理、V1 三入口、回调三协议、轮换两代验签、过期清理三态收敛。
 - **未实现（排期）**：§3.4 的 `epayPriceAdjust`/`epayLockAttempts`/`epayMaxPendingPerMerchant`/`epayCreateRateLimit`；V2 入站验签接线（协议层已就绪，缺 `peer_public_key` 写入入口）；商户级待支付配额。
 - **已知协议限制**：V1 参数值含 `&` 一律拒绝（`CanonicalV1` 对解码值非单射，同一签名可覆盖两组参数）；带多 query 的 `notify_url` 无法接入，替代方案见附录 A。
+- **已知运维边界（backlog）**：关单第一/第三遍按 `created_at` 升序取批 100 行、`keep` 过滤在取批之后——当同一 tick 存在 ≥100 笔「长窗口且未到期」的 pending 单时，更年轻的已到期短窗口单会被挤出批次、延迟关单；长窗口单老化后被第二遍关闭即自愈。容量到这个量级时应改为「先按有效窗口过滤再 limit」（SQL 下推）。
 - **由测试钉住的资金不变量**：`ReleaseByOrdersBefore`/`DeleteExpiredBefore` 只处理已离开 pending 的订单；关单按商户 `close_minutes`（0=跟随全局），原生订单行为逐字节不变。这三条由 `close_window_expiry_test` 与 CI 守护。
 - **发布流程待办**：`Unit tests` 与 `MySQL integration tests` 需设为 required check 并改走 PR——当前直推 main，`pull_request` 触发从未行使过，红灯拦不住合并。
 

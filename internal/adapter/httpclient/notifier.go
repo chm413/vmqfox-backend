@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -56,7 +57,10 @@ func NewNotifier(client *http.Client, outboundCfg ...config.OutboundConfig) *Not
 		// 检查解析出的每个 IP 是否安全（防止 DNS Rebinding 逃逸）
 		for _, ipAddr := range ips {
 			if err := checkIPSecurity(ipAddr.IP, cfg); err != nil {
-				return nil, fmt.Errorf("SSRF 拦截: %w", err)
+				// 拦截细节（含具体 IP）只进服务端日志；对外错误不带 IP——
+				// 这个错误会原样落进通知 dead-letter 的 last_error，管理端可读。
+				log.Printf("[notifier] SSRF 拦截 %s: %v", addr, err)
+				return nil, errors.New("SSRF 拦截: 目标地址不可达")
 			}
 		}
 
@@ -87,8 +91,19 @@ func NewNotifier(client *http.Client, outboundCfg ...config.OutboundConfig) *Not
 		if base, ok := clientCopy.Transport.(*http.Transport); ok && base != nil {
 			cloned := base.Clone()
 			cloned.DialContext = guardedDial
+			// Clone 会保留原 Transport 的 DialTLS/DialTLSContext（net/http 对 https
+			// 优先走 TLS 拨号，DialContext 根本不会被调用）与 Proxy（有代理时拨号目标是
+			// 代理地址，guardedDial 校验的是代理 IP 而不是真实目标）。这两个字段必须清空：
+			// TLS 交回标准握手（证书校验不受影响），直连目标由守卫校验。
+			// 代价是丢掉调用方的 mTLS/代理配置——对通知出站这是正确取舍。
+			cloned.DialTLS = nil
+			cloned.DialTLSContext = nil
+			cloned.Proxy = nil
 			clientCopy.Transport = cloned
 		} else {
+			if clientCopy.Transport != nil {
+				log.Printf("[notifier] 自定义 RoundTripper (%T) 无法安装 SSRF 拨号守卫，已替换为内置 transport", clientCopy.Transport)
+			}
 			clientCopy.Transport = &http.Transport{DialContext: guardedDial}
 		}
 		client = &clientCopy
