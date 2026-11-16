@@ -73,6 +73,11 @@ func openTestDatabase(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := strings.TrimSpace(os.Getenv("VMQ_TEST_MYSQL_DSN"))
 	if dsn == "" {
+		// go test 对 SKIP 报 ok：本地"全绿"里这 14 条用例一条没跑，是假绿。
+		// 设 VMQ_TEST_REQUIRE_MYSQL=1 后，未配 DSN 直接判死，让"没跑"变成显式失败。
+		if os.Getenv("VMQ_TEST_REQUIRE_MYSQL") == "1" {
+			t.Fatal("VMQ_TEST_REQUIRE_MYSQL=1 但未设置 VMQ_TEST_MYSQL_DSN：这条用例必须真跑，不能静默跳过")
+		}
 		t.Skip("未设置 VMQ_TEST_MYSQL_DSN，跳过 MySQL 集成用例")
 	}
 	db, err := Open(dsn, 4, 2, time.Minute)

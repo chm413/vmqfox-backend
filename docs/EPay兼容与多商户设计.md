@@ -252,10 +252,12 @@ CREATE TABLE merchant_keys (
 ### 2.3 改造 `orders`
 
 ```sql
+-- 实现注意（与 002 迁移一致）：同一 ALTER 里引用的新列必须先声明再引用，
+-- MySQL 5.7 的 AFTER 只认「语句执行前已存在的列 + 本语句更早出现的列」。
 ALTER TABLE orders
   ADD COLUMN merchant_id BIGINT NOT NULL DEFAULT 0 AFTER id,
   ADD COLUMN protocol TINYINT NOT NULL DEFAULT 0 AFTER merchant_id,      -- 0=VMQ原生 1=EPayV1 2=EPayV2
-  ADD COLUMN epay_type VARCHAR(16) NOT NULL DEFAULT '' AFTER payment_type,
+  ADD COLUMN epay_type VARCHAR(16) NOT NULL DEFAULT '' AFTER protocol,   -- 实现为 AFTER protocol（见 orders_migration.go）
   ADD COLUMN merchant_order_name VARCHAR(128) NOT NULL DEFAULT '' AFTER epay_type;
 
 -- pay_id 唯一性从全局收敛为「商户内唯一」：生产环境用单条 ALTER 完成，避免无约束窗口
@@ -402,13 +404,13 @@ ALTER TABLE orders
 
 运行时开关进 `settings` 表（管理端可改），部署相关进环境变量（改了要重启）：
 
-| 配置项 | 存储 | 默认 | 作用 |
-| :-- | :-- | :-- | :-- |
-| `epayPriceAdjust` | settings | `1` | EPay 通道是否允许金额微调 |
-| `epayRequireExactCode` | settings | `1` | 微调候选必须存在精确金额码，否则跳过 |
-| `epayLockAttempts` | settings | `10` | 候选金额个数（上限 100），决定偏差上限 `n-1` 分 |
-| `epayMaxPendingPerMerchant` | settings | `50` | 单商户待支付订单并发上限，防单商户吃满金额空间 |
-| `epayCreateRateLimit` / `epayCreateRateWindow` | settings | `10` / `1m` | 商户维度建单限流（按 `merchant_id` 分桶） |
+| 配置项 | 存储 | 默认 | 作用 | 状态 |
+| :-- | :-- | :-- | :-- | :-- |
+| `epayPriceAdjust` | settings | `1` | EPay 通道是否允许金额微调 | ⚠️ 未实现（候选数写死 `priceLockAttempts=10`，微调恒开） |
+| `epayRequireExactCode` | settings | `1` | 微调候选必须存在精确金额码，否则跳过 | ✅ 已实现（精确码门槛） |
+| `epayLockAttempts` | settings | `10` | 候选金额个数（上限 100），决定偏差上限 `n-1` 分 | ⚠️ 未实现（同上，写死） |
+| `epayMaxPendingPerMerchant` | settings | `50` | 单商户待支付订单并发上限，防单商户吃满金额空间 | ⚠️ 未实现（P2 排期，见 §8） |
+| `epayCreateRateLimit` / `epayCreateRateWindow` | settings | `10` / `1m` | 商户维度建单限流（按 `merchant_id` 分桶） | ⚠️ 未实现（目前只有 IP 维度限流） |
 | `masterKeyFingerprint` | settings | 空 | 主密钥自检指纹，非敏感，仅用于启动比对 |
 | `VMQ_MASTER_KEY` | env | 空 | AES-256-GCM 主密钥；存在商户密钥时必填 |
 | `VMQ_MASTER_KEY_VERSION` | env | `1` | 当前主密钥版本号，写入密文的 `key_version` 列 |
@@ -694,7 +696,7 @@ HTTP 状态码统一 `200`，错误放在 `code`/`msg`——EPay 插件普遍只
 | 8 | 未开通渠道 | 明确回「支付方式未开通」，不回落微信/支付宝 | 用户付了钱、类型不匹配，到账无法核销 |
 | 9 | 幂等命中 | 不得重新 `acquirePrice` | `price_locks` 撞自己的锁，金额漂移 |
 | 10 | 输入上限 | 请求体 ≤64KB、参数 ≤32 个 | 签名与歧义校验都是 O(参数字节)，等于开放 CPU 放大 |
-| 11 | 歧义参数文案 | 对外统一「签名错误」（与真正验签失败**同码同文案同耗时**）；审计单独记「参数含歧义分隔符或控制字符」；对外文案固定为：「参数值包含不支持的字符（`&` 或控制字符），请将业务数据放入 `param` 并做 URL 编码，或改用路径段承载；商品名请去掉换行与制表符」 | 线上会被误诊成密钥配错，永远查不出来；文案不到位会变成反复工单 |
+| 11 | 歧义参数文案 | 对外统一「签名错误」（与真正验签失败**同码同文案同耗时**，两者响应 body 逐字节相同，已由 `TestEPaySubmitAmbiguousAndBadSignAreIndistinguishable` 钉住）；审计单独记 `event=epay.reject reason=ampersand field=<参数名> merchant_id=<id>`（**只记字段名，不记参数值**）。含 `&` 的 `notify_url` 无法接入是协议级已知限制（CanonicalV1 非单射，见附录 A），替代方案为路径段承载或业务数据放单个 `param`；运维可凭审计日志区分「参数被拒」与「密钥配错」，不必靠对外文案 | 线上会被误诊成密钥配错；审计日志是事后回溯的唯一线索 |
 | 12 | 成功响应 | `code=1` 时 `msg` 固定空串（全站一致） | EPay 插件有的判空、有的判 `success`，不一致会随机失败 |
 
 ---
@@ -902,6 +904,14 @@ docker-compose.yml / env.example / env.production.example / docs/升级与迁移
 | **P3** | V2 签名 + `/api/pay/create`、`query`、`close`（彩虹/ezfp 系） | **前置门禁**：附录 C 的三项联调核对完成 + 一笔真实报文进仓库。`timestamp` 为 now-301s 返回 `code=-1`、now-299s 返回成功；投递时重签后，停机 30 分钟的商户恢复仍能收通知 |
 | **P4** | 多商户隔离审计 + 运营能力 | 跨商户查单/关单返回与「不存在」逐字节相同；订单导出 CSV 含 `price`/`reallyPrice`/`merchant_no`；管理端展示金额冲突率与实收口径 |
 | **P5** | 存量升级演练 | 旧库备份 → `-migrate` → 新版本启动 → 原生 `/api/order/create` 回归通过；索引切换后 `SHOW INDEX` 与查询计划符合预期 |
+
+### 8.1 实现状态（2026-11-15 审查后更新）
+
+- **P0–P2 已交付**，并通过真实 MySQL 5.7 CI 验证：002/003 迁移、商户与密钥管理、V1 三入口、回调三协议、轮换两代验签、过期清理三态收敛。
+- **未实现（排期）**：§3.4 的 `epayPriceAdjust`/`epayLockAttempts`/`epayMaxPendingPerMerchant`/`epayCreateRateLimit`；V2 入站验签接线（协议层已就绪，缺 `peer_public_key` 写入入口）；商户级待支付配额。
+- **已知协议限制**：V1 参数值含 `&` 一律拒绝（`CanonicalV1` 对解码值非单射，同一签名可覆盖两组参数）；带多 query 的 `notify_url` 无法接入，替代方案见附录 A。
+- **由测试钉住的资金不变量**：`ReleaseByOrdersBefore`/`DeleteExpiredBefore` 只处理已离开 pending 的订单；关单按商户 `close_minutes`（0=跟随全局），原生订单行为逐字节不变。这三条由 `close_window_expiry_test` 与 CI 守护。
+- **发布流程待办**：`Unit tests` 与 `MySQL integration tests` 需设为 required check 并改走 PR——当前直推 main，`pull_request` 触发从未行使过，红灯拦不住合并。
 
 **排序原则**：协议层纯函数先做完（含黄金用例）再动 schema——这一点保留原设计；
 但 `orders.merchant_id` 必须在 P1 之前落库，因为回调要按商户签名，

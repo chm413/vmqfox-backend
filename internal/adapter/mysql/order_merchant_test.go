@@ -245,3 +245,62 @@ func TestOrderMerchantFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("orders 表里的新列与预期不符: %+v", raw)
 	}
 }
+
+// TestOrderCreateConcurrentSamePayIDCollides 在真实 MySQL 上证明「两个事务能同时
+// 穿过 FindByPayIDForUpdate 的间隙锁」：同一 (merchant_id, pay_id) 并发建单，
+// 恰好一条成功、另一条撞 uq_orders_merchant_pay_id 返回 ErrConflict，库里只有一行。
+//
+// 这条是 fake 版并发用例证明不了的部分：fake 用例证明的是「撞键后回放逻辑正确」，
+// 这条证明的是「5.7 的间隙锁下确实会撞键」——回放路径因此是必要的，不是防御性冗余。
+// 只能在 CI（注入 DSN）上跑，本地无 MySQL 时按 SKIP 处理。
+func TestOrderCreateConcurrentSamePayIDCollides(t *testing.T) {
+	db := openTestDatabase(t)
+	resetOrdersTable(t, db)
+	repository := NewOrderRepository(db)
+	ctx := context.Background()
+
+	const (
+		merchantID = int64(9)
+		payID      = "EPAY-CONCURRENT-1"
+	)
+	start := time.Now().Add(500 * time.Millisecond) // 栅栏：两个 goroutine 同时起跑
+	results := make(chan string, 2)
+	for seed := int64(0); seed < 2; seed++ {
+		go func(seed int64) {
+			time.Sleep(time.Until(start))
+			created, err := repository.Create(ctx, newMerchantOrder(merchantID, payID, hexToken(int(5000+seed))))
+			if err != nil {
+				results <- "ERR:" + err.Error()
+				return
+			}
+			results <- created.OrderID
+		}(seed)
+	}
+
+	var successes, conflicts int
+	var firstOrderID string
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if strings.HasPrefix(result, "ERR:") {
+			errText := strings.TrimPrefix(result, "ERR:")
+			if !strings.Contains(errText, "1062") && !strings.Contains(errText, "冲突") {
+				t.Fatalf("并发失败应是唯一键冲突，实际 %s", errText)
+			}
+			conflicts++
+			continue
+		}
+		successes++
+		firstOrderID = result
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("应恰好 1 成功 1 冲突，实际 成功=%d 冲突=%d（间隙锁未生效时会出现双成功或双失败）", successes, conflicts)
+	}
+
+	found, err := repository.FindByPayID(ctx, merchantID, payID)
+	if err != nil {
+		t.Fatalf("并发后应能按 (merchant,pay_id) 查到唯一订单，实际 err=%v", err)
+	}
+	if found.OrderID != firstOrderID {
+		t.Fatalf("落库的订单应是成功那笔: want %s got %s", firstOrderID, found.OrderID)
+	}
+}
