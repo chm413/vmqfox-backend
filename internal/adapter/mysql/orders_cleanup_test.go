@@ -16,6 +16,7 @@ import (
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/order"
 	"github.com/hulisang/vmqfox-backend/internal/port"
+	"gorm.io/gorm"
 )
 
 // TestExpiredCleanupKeepsPendingAndDropsClosed 覆盖 DeleteExpiredBefore：
@@ -55,12 +56,32 @@ func TestExpiredCleanupKeepsPendingAndDropsClosed(t *testing.T) {
 	}
 }
 
+// resetPriceLocksTable 重建 price_locks（其余用例不碰这张表，vmq_test 里默认不存在）。
+// DDL 与 database/schema.sql 保持一致；主键 (payment_type, amount_cent) 就是金额锁本身。
+func resetPriceLocksTable(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Exec("DROP TABLE IF EXISTS price_locks").Error; err != nil {
+		t.Fatalf("清理 price_locks 表失败: %v", err)
+	}
+	if err := db.Exec("CREATE TABLE price_locks (" +
+		"payment_type TINYINT NOT NULL," +
+		"amount_cent BIGINT NOT NULL," +
+		"order_id VARBINARY(128) NOT NULL," +
+		"created_at DATETIME(6) NOT NULL," +
+		"PRIMARY KEY (payment_type, amount_cent)," +
+		"UNIQUE KEY uq_price_locks_order_id (order_id)" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci").Error; err != nil {
+		t.Fatalf("重建 price_locks 表失败: %v", err)
+	}
+}
+
 // TestExpiredLockReleaseSkipsPendingOrders 覆盖 ReleaseByOrdersBefore：
 // 超过全局窗口的 pending 单的金额锁必须保留（提前放锁 = 同一金额卖两次），
 // 同龄 closed 单的锁必须被释放（不再被该金额占死）。
 func TestExpiredLockReleaseSkipsPendingOrders(t *testing.T) {
 	db := openTestDatabase(t)
 	resetOrdersTable(t, db)
+	resetPriceLocksTable(t, db)
 	orderRepo := NewOrderRepository(db)
 	lockRepo := NewPriceLockRepository(db)
 	ctx := context.Background()
