@@ -366,3 +366,135 @@ func TestNormalizeRSAPublicKeyPEMBounds(t *testing.T) {
 		t.Fatalf("应命中位数上限并给出可读错误，实际 %v", err)
 	}
 }
+
+// TestEPayAuthenticateDoesNotMixProtocols 锁定协议隔离：
+// 只有 V1 密钥的商户，不能用 V2 报文（RSA + timestamp）验过；
+// 只有 V2 密钥的商户，也不能用 V1 的 MD5 报文验过。
+//
+// 串协议的后果比「验不过」严重得多：若 V2 分支退化成用 V1 共享密钥做 HMAC，
+// 或反过来用商户公钥当共享密钥，攻击者拿公开信息就能伪造任意商户下单。
+func TestEPayAuthenticateDoesNotMixProtocols(t *testing.T) {
+	const v1Secret = "abcdefghjkmnpqrstuvwxyz23456789"
+
+	t.Run("只有V1密钥时V2报文必须失败", func(t *testing.T) {
+		service, env := epayV1TestService(t, nil)
+		env.keys.active[epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV1)] = sealEPayV1Key(t, env.box, testMerchantID, v1Secret)
+
+		merchantPrivatePEM, merchantPublicPEM, err := merchant.NewRSAKeyPair()
+		if err != nil {
+			t.Fatalf("生成商户密钥对失败: %v", err)
+		}
+		_ = merchantPublicPEM
+
+		params := map[string]string{
+			"pid":          testMerchantNo,
+			"type":         "alipay",
+			"out_trade_no": "MIX-1",
+			"notify_url":   "https://m.example.com/notify",
+			"name":         "跨协议",
+			"money":        "0.01",
+			"timestamp":    strconv.FormatInt(epayTestNow.Unix(), 10),
+		}
+		sign, err := epay.SignV2(params, merchantPrivatePEM)
+		if err != nil {
+			t.Fatalf("V2 签名失败: %v", err)
+		}
+		params["sign"] = sign
+		params["sign_type"] = "RSA"
+
+		if _, _, err := service.Authenticate(context.Background(), params); err == nil {
+			t.Fatal("只有 V1 密钥的商户，V2 报文必须验不过")
+		}
+	})
+
+	t.Run("只有V2密钥时V1报文必须失败", func(t *testing.T) {
+		service, env := epayV1TestService(t, nil)
+		_, merchantPublicPEM, err := merchant.NewRSAKeyPair()
+		if err != nil {
+			t.Fatalf("生成商户密钥对失败: %v", err)
+		}
+		_, platformPrivatePEM, err := merchant.NewRSAKeyPair()
+		if err != nil {
+			t.Fatalf("生成平台密钥失败: %v", err)
+		}
+		env.keys.active[epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV2)] = sealEPayV2Key(
+			t, env.box, testMerchantID, merchantPublicPEM, platformPrivatePEM)
+
+		params := map[string]string{
+			"pid":          testMerchantNo,
+			"type":         "alipay",
+			"out_trade_no": "MIX-2",
+			"notify_url":   "https://m.example.com/notify",
+			"name":         "跨协议",
+			"money":        "0.01",
+		}
+		// 用「共享密钥」的 V1 规则签名；商户只有 V2 密钥，不能验过。
+		v1Sign, err := epay.SignV1(params, v1Secret)
+		if err != nil {
+			t.Fatalf("V1 签名失败: %v", err)
+		}
+		params["sign"] = v1Sign
+		params["sign_type"] = "MD5"
+
+		if _, _, err := service.Authenticate(context.Background(), params); err == nil {
+			t.Fatal("只有 V2 密钥的商户，V1 报文必须验不过")
+		}
+	})
+}
+
+// TestEPayAuthenticateV2RequiresValidTimestamp 覆盖时间戳本身的三种非法形态：
+// 缺失、非数字、长度不对。任何一条被放过，重放窗口就等于无限。
+//
+// 关键：每个用例都用**与该商户公钥匹配的私钥**重新签名，使签名本身有效，
+// 这样失败只能归因于时间戳——否则「签名无效」会让用例变成假绿。
+func TestEPayAuthenticateV2RequiresValidTimestamp(t *testing.T) {
+	service, env := epayV1TestService(t, nil)
+
+	merchantPrivatePEM, merchantPublicPEM, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成商户密钥对失败: %v", err)
+	}
+	_, platformPrivatePEM, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成平台密钥失败: %v", err)
+	}
+	env.keys.active[epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV2)] = sealEPayV2Key(
+		t, env.box, testMerchantID, merchantPublicPEM, platformPrivatePEM)
+
+	cases := []struct {
+		name      string
+		timestamp string
+	}{
+		{name: "缺失", timestamp: ""},
+		{name: "非数字", timestamp: "not-a-number"},
+		{name: "十一位", timestamp: "16974528000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := map[string]string{
+				"pid":          testMerchantNo,
+				"type":         "alipay",
+				"out_trade_no": "TS-" + tc.name,
+				"notify_url":   "https://m.example.com/notify",
+				"name":         "时间戳校验",
+				"money":        "0.01",
+				"timestamp":    tc.timestamp,
+			}
+			if tc.timestamp == "" {
+				delete(params, "timestamp")
+			}
+			sign, signErr := epay.SignV2(params, merchantPrivatePEM)
+			if signErr != nil {
+				t.Fatalf("构造合法签名失败: %v", signErr)
+			}
+			params["sign"] = sign
+			params["sign_type"] = "RSA"
+
+			if _, _, err := service.Authenticate(context.Background(), params); err == nil {
+				t.Fatalf("timestamp=%q 必须拒绝", tc.timestamp)
+			} else if code, _ := ErrorCodeOf(err); code != CodeInvalidSignature {
+				t.Fatalf("对外应为 CodeInvalidSignature，实际 code=%v err=%v", code, err)
+			}
+		})
+	}
+}

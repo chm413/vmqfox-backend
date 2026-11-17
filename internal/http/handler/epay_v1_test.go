@@ -33,6 +33,15 @@ type stubEPayManager struct {
 	queryCalls      int
 	queryMerchant   int64
 	queryOutTradeNo string
+
+	// protocol 非零时作为 Authenticate 的返回值，用于覆盖 V2 的报文契约。
+	// 零值保持 V1，既有用例不需要改。
+	protocol     merchant.Protocol
+	signFields   map[string]string
+	signCalls    int
+	signErr      error
+	signTimestamp string
+	signValue     string
 }
 
 func (m *stubEPayManager) Authenticate(context.Context, map[string]string) (merchant.Merchant, merchant.Protocol, error) {
@@ -40,15 +49,32 @@ func (m *stubEPayManager) Authenticate(context.Context, map[string]string) (merc
 	if m.authErr != nil {
 		return merchant.Merchant{}, 0, m.authErr
 	}
-	if m.identity.ID == 0 {
-		return merchant.Merchant{ID: 7, No: "M7K3QPX9Z2AB4C", Enabled: true}, merchant.ProtocolEPayV1, nil
+	protocol := m.protocol
+	if protocol == 0 {
+		protocol = merchant.ProtocolEPayV1
 	}
-	return m.identity, merchant.ProtocolEPayV1, nil
+	if m.identity.ID == 0 {
+		return merchant.Merchant{ID: 7, No: "M7K3QPX9Z2AB4C", Enabled: true}, protocol, nil
+	}
+	return m.identity, protocol, nil
 }
 
-// SignEPayResponse：stub 只验证接线（V1 用例不会走到 V2 分支），固定返回可辨识的值。
-func (m *stubEPayManager) SignEPayResponse(context.Context, int64, map[string]string) (string, string, error) {
-	return "1700000000", "stub-sign", nil
+// SignEPayResponse 记录被签的字段集，供契约断言「签的是哪些字段」。
+func (m *stubEPayManager) SignEPayResponse(_ context.Context, _ int64, fields map[string]string) (string, string, error) {
+	m.signCalls++
+	m.signFields = fields
+	if m.signErr != nil {
+		return "", "", m.signErr
+	}
+	timestamp := m.signTimestamp
+	if timestamp == "" {
+		timestamp = "1700000000"
+	}
+	sign := m.signValue
+	if sign == "" {
+		sign = "stub-sign"
+	}
+	return timestamp, sign, nil
 }
 
 func (m *stubEPayManager) Create(_ context.Context, input usecase.EPayCreateInput) (usecase.EPayCreateResult, error) {

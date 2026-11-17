@@ -257,3 +257,83 @@ func copyParams(params map[string]string) map[string]string {
 	}
 	return copied
 }
+
+// TestV2SignatureCoversTimestamp 锁定 V2 的两条签名域契约：
+//
+//  1. timestamp 必须参与签名——否则 ±300s 的时间窗只校验「报文字段」，
+//     抓到一个签名就能在窗口内重放；
+//  2. sign 与 sign_type 不参与签名——它们是签名结果与算法标识，
+//     参与进去等于自引用，且商户与平台两侧永远算不出同一个串。
+//
+// RSA PKCS#1 v1.5 是确定性填充，同一组参数两次签名结果逐字节相同，
+// 因此这里可以直接比较签名串，不必依赖验签的布尔结果。
+func TestV2SignatureCoversTimestamp(t *testing.T) {
+	privatePEM, publicPEM := testV2Keys(t)
+	now := time.Unix(1697452800, 0)
+
+	params := goldenParams()
+	AppendTimestamp(params, now)
+	baseSign, err := SignV2(params, privatePEM)
+	if err != nil {
+		t.Fatalf("SignV2 返回错误: %v", err)
+	}
+
+	// 1) 去掉 timestamp 后必须验不过（它确实在签名域里）。
+	withoutTimestamp := make(map[string]string, len(params))
+	for name, value := range params {
+		if name == "timestamp" {
+			continue
+		}
+		withoutTimestamp[name] = value
+	}
+	if err := VerifyV2(withoutTimestamp, publicPEM, baseSign); err == nil {
+		t.Fatal("去掉 timestamp 仍能验过，说明时间戳没有参与签名")
+	}
+
+	// 2) 加入 sign/sign_type 不改变签名（它们被剔除）。
+	withSign := make(map[string]string, len(params)+2)
+	for name, value := range params {
+		withSign[name] = value
+	}
+	withSign["sign"] = "any-signature-value"
+	withSign["sign_type"] = "RSA"
+	again, err := SignV2(withSign, privatePEM)
+	if err != nil {
+		t.Fatalf("SignV2 返回错误: %v", err)
+	}
+	if again != baseSign {
+		t.Fatal("sign/sign_type 必须被排除在签名域之外，实际改变了签名结果")
+	}
+}
+
+// TestV2CanonicalGolden 钉住 V2 待签串的字节形态。
+//
+// 这里刻意直接断言字符串而不是只做「自签自验」：自签自验对排序错误是盲的——
+// 两侧用同一套错误排序仍然能互相验过，但对接方的 PHP 实现按 ksort 排，
+// 一旦我们这边「优化」了顺序或编码，商户侧会全量验签失败。
+func TestV2CanonicalGolden(t *testing.T) {
+	params := map[string]string{
+		"pid":          "M2026",
+		"trade_no":     "20261113000001",
+		"out_trade_no": "M20261113001",
+		"type":         "alipay",
+		"name":         "商品",
+		"money":        "10.00",
+		"trade_status": "TRADE_SUCCESS",
+		"param":        "",
+		"timestamp":    "1697452800",
+		"sign":         "should-be-dropped",
+		"sign_type":    "RSA",
+	}
+
+	canonical, err := CanonicalV1(params)
+	if err != nil {
+		t.Fatalf("CanonicalV1 返回错误: %v", err)
+	}
+	// 参数名 ASCII 升序；空值（param）与 sign/sign_type 被剔除；值不做 URL 编码。
+	const want = "money=10.00&name=商品&out_trade_no=M20261113001&pid=M2026" +
+		"&timestamp=1697452800&trade_no=20261113000001&trade_status=TRADE_SUCCESS&type=alipay"
+	if canonical != want {
+		t.Fatalf("V2 待签串与契约不一致\n want=%s\n  got=%s", want, canonical)
+	}
+}
