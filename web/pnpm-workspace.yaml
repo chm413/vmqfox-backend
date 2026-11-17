@@ -1,2 +1,9 @@
 allowBuilds:
   esbuild: true
+
+# follow-redirects <1.16.2 有三条 high（凭据透传 / 敏感头跨源泄露），它是 axios 的传递依赖。
+# pnpm v10 起 overrides 只从本文件读取，写在 package.json 的 pnpm 段不生效（实测无效）。
+overrides:
+  follow-redirects: ^1.16.2
+  # postcss 依赖的 source-map-js <1.2.2 存在事件循环 DoS；仅构建期使用，仍一并升级。
+  source-map-js: ^1.2.2
