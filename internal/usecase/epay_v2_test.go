@@ -303,3 +303,59 @@ func TestEPayCreateV2PersistsProtocol(t *testing.T) {
 		t.Fatalf("订单协议必须是 V2（决定回调签名密钥），实际 %v", got)
 	}
 }
+
+// TestMerchantServiceUpdateRejectsBadPeerKeyWithoutPartialWrite 锁定「整体失败」语义：
+// 公钥非法时，商户名/启停/有效期都不能落库。否则运营看到报错以为没改，
+// 实际已经改了一半，下次进页面才发现名字变了。
+func TestMerchantServiceUpdateRejectsBadPeerKeyWithoutPartialWrite(t *testing.T) {
+	box := newMerchantServiceTestBox(t)
+	service, repo, _ := newMerchantServiceUnderTest(t, box)
+
+	created, err := service.Create(context.Background(), CreateMerchantInput{Name: "原名", CloseMinutes: 10})
+	if err != nil {
+		t.Fatalf("创建商户失败: %v", err)
+	}
+
+	bad := "-----BEGIN PUBLIC KEY-----\nZm9v\n-----END PUBLIC KEY-----"
+	_, err = service.Update(context.Background(), created.Merchant.ID, UpdateMerchantInput{
+		Name:          "新名",
+		Enabled:       false,
+		CloseMinutes:  99,
+		PeerPublicKey: &bad,
+	})
+	if err == nil {
+		t.Fatal("非法公钥必须拒绝更新")
+	}
+	if code, _ := ErrorCodeOf(err); code != CodeInvalidArgument {
+		t.Fatalf("应为 CodeInvalidArgument，实际 code=%v err=%v", code, err)
+	}
+
+	stored := repo.items[created.Merchant.ID]
+	if stored.Name != "原名" || !stored.Enabled || stored.CloseMinutes != 10 {
+		t.Fatalf("公钥校验失败时不得落库任何字段，实际 name=%q enabled=%v close=%d",
+			stored.Name, stored.Enabled, stored.CloseMinutes)
+	}
+}
+
+// TestNormalizeRSAPublicKeyPEMBounds 锁定公钥尺寸边界：2048/4096 通过，8192 拒绝。
+// 上界不是洁癖：peer_public_key 是 varchar(1024)，8192 位 PEM 约 1516 字节，
+// 写库要么 500、要么被非严格模式静默截断，后者会让该商户 V2 请求永远「签名错误」。
+func TestNormalizeRSAPublicKeyPEMBounds(t *testing.T) {
+	for _, bits := range []int{2048, 4096} {
+		_, pub, err := merchant.NewRSAKeyPairWithBits(bits)
+		if err != nil {
+			t.Fatalf("生成 %d 位密钥失败: %v", bits, err)
+		}
+		if _, err := merchant.NormalizeRSAPublicKeyPEM(string(pub)); err != nil {
+			t.Fatalf("%d 位公钥应通过校验，实际 %v", bits, err)
+		}
+	}
+
+	_, big, err := merchant.NewRSAKeyPairWithBits(8192)
+	if err != nil {
+		t.Fatalf("生成 8192 位密钥失败: %v", err)
+	}
+	if _, err := merchant.NormalizeRSAPublicKeyPEM(string(big)); err == nil {
+		t.Fatal("8192 位公钥必须被拒绝（超出列宽与验签成本上限）")
+	}
+}

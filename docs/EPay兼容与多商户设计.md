@@ -911,6 +911,8 @@ docker-compose.yml / env.example / env.production.example / docs/升级与迁移
 - **管理端界面已交付（V3.4）**：商户管理页（列表/新建/编辑/启停/轮换/查看平台公钥，明文密钥一次性弹窗）、订单页商户列与商户筛选、开发文档内的 EPay 接入说明。P2 验收项「管理端商户 CRUD/轮换」至此在 UI 侧补齐。
 - **未实现（排期）**：§3.4 的 `epayPriceAdjust`/`epayLockAttempts`/`epayMaxPendingPerMerchant`/`epayCreateRateLimit`；商户级待支付配额。
 - **V2 已开放（2026-11-17）**：创建商户可选 V2 并录入商户公钥（PKIX PEM 校验 + 规范化），入站验签按两代密钥逐一尝试（V2 用每行自己的 `peer_public_key`，先校验 ±300s 时间戳），订单落库 `protocol=2` 使回调自动走 V2 签名，`mapi.php`/`api.php` 响应带 `timestamp` 与平台私钥签名。商户公钥可在「编辑商户」中更新，无需轮换平台密钥。
+
+- **实现差异（`/api/pay/*`）**：§5.1 规划了 V2 的 `/api/pay/create|query|close` 与 `/api/merchant/info`，**当前实现未提供这四个路由**——V2 复用 V1 的三入口（`submit.php`/`mapi.php`/`api.php`），差异只在签名算法、`timestamp`、响应签名。因此按 §5.1 地址接入的插件会 404；接入前必须确认插件能把网关地址配到 `mapi.php`。若目标插件硬编码 `/api/pay/*`，属独立增量开发，不在 V3.6 范围内。
 - **已知协议限制**：V1 参数值含 `&` 一律拒绝（`CanonicalV1` 对解码值非单射，同一签名可覆盖两组参数）；带多 query 的 `notify_url` 无法接入，替代方案见附录 A。
 - **已知运维边界（backlog）**：关单第一/第三遍按 `created_at` 升序取批 100 行、`keep` 过滤在取批之后——当同一 tick 存在 ≥100 笔「长窗口且未到期」的 pending 单时，更年轻的已到期短窗口单会被挤出批次、延迟关单；长窗口单老化后被第二遍关闭即自愈。容量到这个量级时应改为「先按有效窗口过滤再 limit」（SQL 下推）。
 - **由测试钉住的资金不变量**：`ReleaseByOrdersBefore`/`DeleteExpiredBefore` 只处理已离开 pending 的订单；关单按商户 `close_minutes`（0=跟随全局），原生订单行为逐字节不变。这三条由 `close_window_expiry_test` 与 CI 守护。

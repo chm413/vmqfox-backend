@@ -355,6 +355,14 @@ func (s *MerchantService) Update(ctx context.Context, id int64, input UpdateMerc
 		return MerchantView{}, err
 	}
 
+	// 公钥校验必须在写商户行之前：先改名字再报「公钥无效」，
+	// 运营会以为自己改了两次，而库里已经落了一半改动。
+	if input.PeerPublicKey != nil {
+		if _, err := merchant.NormalizeRSAPublicKeyPEM(*input.PeerPublicKey); err != nil {
+			return MerchantView{}, fail(CodeInvalidArgument, "商户公钥无效："+err.Error())
+		}
+	}
+
 	updated := current
 	updated.Name = name
 	updated.Note = note

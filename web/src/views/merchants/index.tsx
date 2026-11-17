@@ -58,6 +58,8 @@ export const MerchantsView: React.FC = () => {
   const [editName, setEditName] = useState('')
   const [editClose, setEditClose] = useState('30')
   const [editNote, setEditNote] = useState('')
+  // 留空表示不改公钥：列表接口不返回公钥明文，回显一个「看不见的旧值」只会误导运营。
+  const [editPeerKey, setEditPeerKey] = useState('')
 
   // 轮换
   const [rotateTarget, setRotateTarget] = useState<MerchantItem | null>(null)
@@ -121,6 +123,8 @@ export const MerchantsView: React.FC = () => {
         enabled: params.enabled ?? params.item.enabled,
         closeMinutes: Number(editClose) || 0,
         note: editNote.trim(),
+        // 空串不传：避免把「没填」当成「清空公钥」，那会让 V2 商户直接验不了签。
+        peerPublicKey: editPeerKey.trim() ? editPeerKey.trim() : undefined,
       }),
     onSuccess: () => {
       toast.success('商户已更新')
@@ -170,6 +174,7 @@ export const MerchantsView: React.FC = () => {
     setEditName(item.name)
     setEditClose(String(item.closeMinutes))
     setEditNote(item.note)
+    setEditPeerKey('')
   }
 
   const openRotate = (item: MerchantItem) => {
@@ -430,6 +435,23 @@ export const MerchantsView: React.FC = () => {
               <label className="text-xs font-medium text-muted-foreground">备注</label>
               <Input value={editNote} onChange={(e) => setEditNote(e.target.value)} />
             </div>
+            {editTarget?.v2Enabled && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  商户公钥（PKIX PEM，留空 = 不修改）
+                </label>
+                <textarea
+                  value={editPeerKey}
+                  onChange={(e) => setEditPeerKey(e.target.value)}
+                  rows={5}
+                  placeholder={'商户重新生成密钥对后，把新公钥贴在这里；不改就留空'}
+                  className="w-full rounded-xl border border-border bg-muted/40 p-3 font-mono text-[10px] leading-relaxed"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  只替换当前代商户公钥，不会轮换平台密钥；旧公钥立刻失效，商户必须先换好配置再保存。
+                </p>
+              </div>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setEditTarget(null)}>
                 取消
@@ -468,8 +490,9 @@ export const MerchantsView: React.FC = () => {
                 value={rotateProtocol}
                 onChange={(e) => setRotateProtocol(Number(e.target.value) === 2 ? 2 : 1)}
               >
-                <option value={1}>EPay V1（共享密钥，MD5）</option>
-                <option value={2}>EPay V2（RSA 平台公钥）</option>
+                {/* 只列已开通的协议：给 V2-only 商户一个 V1 选项，点了必然报「未开通 V1」。 */}
+                {rotateTarget?.v1Enabled && <option value={1}>EPay V1（共享密钥，MD5）</option>}
+                {rotateTarget?.v2Enabled && <option value={2}>EPay V2（RSA 平台公钥）</option>}
               </select>
               {rotateProtocol === 2 && !rotateTarget?.v2Enabled && (
                 <p className="text-[11px] text-amber-600">

@@ -62,8 +62,14 @@ func IsValidV1Secret(secret string) bool {
 // NewRSAKeyPair 生成 V2 平台密钥对，返回 PKCS#8 私钥 PEM 与 PKIX 公钥 PEM。
 // 平台私钥由本网关自己加密入库，公钥导出给商户验签；每商户一把，不共享。
 func NewRSAKeyPair() (privatePKCS8PEM, publicPKIXPEM []byte, err error) {
+	return NewRSAKeyPairWithBits(rsaBits)
+}
+
+// NewRSAKeyPairWithBits 按指定位数生成密钥对，仅供测试验证位数边界。
+// 生产路径固定 2048：位数由商户侧决定，平台侧不接受更长的私钥。
+func NewRSAKeyPairWithBits(bits int) (privatePKCS8PEM, publicPKIXPEM []byte, err error) {
 	// 用 rsa.GenerateKey 而不是自己拼素数：它的随机源固定是 crypto/rand。
-	key, err := rsa.GenerateKey(rand.Reader, rsaBits)
+	key, err := rsa.GenerateKey(rand.Reader, bits)
 	if err != nil {
 		return nil, nil, fmt.Errorf("生成 RSA 密钥对失败: %w", err)
 	}
@@ -105,7 +111,7 @@ func HintPublicKey(publicPEM []byte) string {
 //
 // 为什么必须在这里校验而不是等到第一次验签：V2 的 peer_public_key 是「开通凭据」，
 // 存进库里的必须是一把能用的公钥。若允许存垃圾，商户下单时才报错，而对外只能回
-//「签名错误」——运维会去查商户配置，实际是我方库里存了一坨坏数据，方向全错。
+// 「签名错误」——运维会去查商户配置，实际是我方库里存了一坨坏数据，方向全错。
 //
 // 同时做规范化：不同来源（openssl、Java keytool、在线工具）给出的 PEM 行宽、
 // 结尾换行、CRLF 都可能不同，规范化后 HintPublicKey 才稳定可比对。
@@ -129,7 +135,20 @@ func NormalizeRSAPublicKeyPEM(pemText string) (string, error) {
 	if key.N.BitLen() < 2048 {
 		return "", fmt.Errorf("RSA 公钥长度 %d 位，至少需要 2048 位", key.N.BitLen())
 	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: block.Bytes})), nil
+	// 上界不只是「够不够用」：peer_public_key 是 varchar(1024)，8192 位 PEM 约 1516 字节，
+	// 写库会触发 Data too long——严格模式报 500，非严格模式被静默截断，
+	// 此后该商户所有 V2 请求都变成「签名错误」，排障会一路查错方向。
+	const maxRSABits = 4096
+	if key.N.BitLen() > maxRSABits {
+		return "", fmt.Errorf("RSA 公钥长度 %d 位，最多支持 %d 位", key.N.BitLen(), maxRSABits)
+	}
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: block.Bytes})
+	// 列宽上限，留出余量给换行符；宁可在这里拒绝，也不要在 SQL 层截断。
+	const maxPeerPublicKeyBytes = 1024
+	if len(encoded) > maxPeerPublicKeyBytes {
+		return "", fmt.Errorf("公钥 PEM 长度 %d 字节，超过 %d 字节上限", len(encoded), maxPeerPublicKeyBytes)
+	}
+	return string(encoded), nil
 }
 
 // randomFromAlphabet 用 crypto/rand 逐字符取料。

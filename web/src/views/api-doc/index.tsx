@@ -125,7 +125,7 @@ export const ApiDocView: React.FC = () => {
           {/* 5. EPay 商户接入 */}
           <div className="space-y-3">
             <h3 className="font-bold text-foreground flex items-center gap-1.5">
-              <Store className="size-4 text-primary" /> 5. EPay 商户接入（V1）
+              <Store className="size-4 text-primary" /> 5. EPay 商户接入（V1 / V2）
             </h3>
             <div className="text-xs text-muted-foreground leading-relaxed space-y-1.5">
               <div>
@@ -157,6 +157,45 @@ export const ApiDocView: React.FC = () => {
               <div>
                 异步回调是 <b>GET</b>：我们会带 <code>pid/trade_no/out_trade_no/type/name/money/trade_status/param/sign/sign_type</code>
                 请求你的 <code>notify_url</code>，你返回纯文本 <code>success</code> 即视为送达。
+              </div>
+            </div>
+          </div>
+
+          {/* 5.1 EPay V2 */}
+          <div className="space-y-3">
+            <h3 className="font-bold text-foreground flex items-center gap-1.5">
+              <Store className="size-4 text-primary" /> 5.1 EPay V2（RSA 双向签名）
+            </h3>
+            <div className="text-xs text-muted-foreground leading-relaxed space-y-1.5">
+              <div>
+                开通时选 V2 并录入<b>商户自己的公钥</b>（PKIX PEM，2048 或 4096 位）；创建成功后会拿到
+                <b>平台公钥</b>，请配置到商户面板，用于验证我们的响应与回调。
+              </div>
+              <div>
+                下单与验签参数跟 V1 完全一样，额外带 <code>timestamp</code>（10 位秒级）参与签名；
+                签名用<b>商户私钥</b>做 SHA256withRSA，<code>sign</code> 为 Base64，<code>sign_type=RSA</code>。
+              </div>
+            </div>
+            <div className="p-4 bg-muted/50 rounded-2xl border border-border/70 space-y-2 font-mono text-xs leading-relaxed">
+              <div className="text-muted-foreground">// V2 待签串与 V1 同构：剔 sign/sign_type、剔空值、ASCII 升序、值不 urlencode</div>
+              <div className="text-primary font-semibold break-all">
+                sign = base64( RSA_SHA256( canonical + timestamp ) )
+              </div>
+            </div>
+            <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-400 leading-relaxed space-y-1.5">
+              <div>
+                <b>时间戳窗口 ±300 秒</b>：超窗的请求即使签名正确也按「签名错误」拒绝，
+                商户服务器必须做 NTP 对时，否则极易误判成密钥配错。
+              </div>
+              <div>
+                响应与回调都会带 <code>timestamp</code> 和平台私钥签名：<code>mapi.php</code> 签
+                <code>code/trade_no/payurl/qrcode</code>，<code>api.php</code> 签查单字段集，回调签
+                <code>pid/trade_no/out_trade_no/type/name/money/trade_status/param</code>；空值不参与签名。
+              </div>
+              <div>
+                <b>接入前请先与商户联调确认调用地址</b>：本网关 V2 复用 V1 的
+                <code>submit.php</code>/<code>mapi.php</code>/<code>api.php</code>，
+                暂未实现部分彩虹/ezfp 文档中的 <code>/api/pay/*</code> 路径。
               </div>
             </div>
           </div>

@@ -19,8 +19,9 @@ import (
 // 密钥操作审计事件。创建与轮换是唯一会改变商户密钥的入口，
 // 误操作（例如把 V2 商户降级回 V1）之后，这行日志是唯一的追溯手段。
 const (
-	auditEventKeyCreate = "merchant.key.create"
-	auditEventKeyRotate = "merchant.key.rotate"
+	auditEventKeyCreate     = "merchant.key.create"
+	auditEventKeyPeerUpdate = "merchant.key.peer_update"
+	auditEventKeyRotate     = "merchant.key.rotate"
 
 	// auditUnknown 用于身份取不到时占位：宁可记 unknown，也不要让字段消失，
 	// 否则日志里分不清「没人操作」和「忘了记」。
@@ -199,8 +200,23 @@ func updateMerchantHandler(service MerchantManager) gin.HandlerFunc {
 			PeerPublicKey: peerPublicKey,
 		})
 		if err != nil {
+			// 换公钥失败要留痕：它是「谁能替该商户签名下单」的变更，不能只回一句错误就过去。
+			if peerPublicKey != nil {
+				logMerchantKeyAudit(c, merchantKeyAuditErrorLine(auditEventKeyPeerUpdate, id, "", err))
+			}
 			writeMerchantError(c, err)
 			return
+		}
+		if peerPublicKey != nil {
+			// 只记协议与公钥指纹，永不记公钥以外的内容（公钥本身不敏感，但没必要入日志）。
+			logMerchantKeyAudit(c, merchantKeyAuditLine(
+				auditEventKeyPeerUpdate,
+				view.ID,
+				view.MerchantNo,
+				int(merchant.ProtocolEPayV2),
+				view.V2Hint,
+				merchantOperator(c),
+			))
 		}
 		c.JSON(http.StatusOK, php.NewEnvelope(200, "保存成功", apiMerchantViewData(view)))
 	}
