@@ -2,7 +2,10 @@
 
 # Docker Compose 一键部署（推荐）
 
-> 适用版本：V3.0（Go-only 单服务）。compose 只启动 **两个服务**：`vmqfox-api`（内嵌 React 前端）与 `mysql`，不再有独立前端容器、Nginx 容器与 Redis。
+> 适用版本：V3.0 起（当前 V3.4）。compose 只启动 **两个服务**：`vmqfox-api`（内嵌 React 前端）与 `mysql`，不再有独立前端容器、Nginx 容器与 Redis。
+>
+> V3.4 起管理台新增 **商户管理**（EPay 多商户），升级时多一步数据库迁移，见[升级与迁移](升级与迁移.md)。
+> 镜像 tag 规则：`ghcr.io/chm413/vmqfox-backend:go-<版本>`（如 `go-v3.4`）、`go-dev`、`go-<commit>`。
 
 ## 前置要求
 
@@ -59,10 +62,14 @@ docker compose exec vmqfox-api ./vmqfox-api -init-admin
 
 > [!NOTE]
 > 服务进程本身启动时不会自动建表，请先完成初始化再对外放流。`database/schema.sql` 仅作为表结构参考或 DBA 特殊场景手工建库用；只想单独建表可运行 `docker compose exec vmqfox-api ./vmqfox-api -init-db`。
+>
+> 初始化/建表完成后补一次迁移（幂等），让 `schema_migrations` 记录 001/002/003：
+> `docker compose run --rm --no-deps vmqfox-api /usr/local/bin/vmqfox-api -migrate`。
 
 ### 4. 访问
 
 `http://<主机>:${VMQ_HTTP_PORT:-8000}` 即唯一生产入口：管理台、收银台与 API 全部同源提供。
+管理台侧栏包含总览、订单（可按商户筛选）、**商户管理**、码库、监控端、系统设置与开发文档。
 健康检查：`GET /health`（进程存活）、`GET /ready`（数据库连通）。
 
 ## 升级已有 Go-only 订单库
