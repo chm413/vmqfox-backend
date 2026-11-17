@@ -355,7 +355,14 @@ func TestNormalizeRSAPublicKeyPEMBounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("生成 8192 位密钥失败: %v", err)
 	}
-	if _, err := merchant.NormalizeRSAPublicKeyPEM(string(big)); err == nil {
+	_, err = merchant.NormalizeRSAPublicKeyPEM(string(big))
+	if err == nil {
 		t.Fatal("8192 位公钥必须被拒绝（超出列宽与验签成本上限）")
+	}
+	// 断言走的是「位数」分支而不是「字节长度」分支：
+	// 两道上限在 8192 位这个输入上是重叠的（PEM≈1516B > 1024B），只断言「报错」
+	// 会让位数判断永远无法被单独证伪。错误消息里带位数，才能钉住这个分支。
+	if !strings.Contains(err.Error(), "4096") {
+		t.Fatalf("应命中位数上限并给出可读错误，实际 %v", err)
 	}
 }
