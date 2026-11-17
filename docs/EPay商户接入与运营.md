@@ -89,6 +89,16 @@ V2 与 V1 的差异只有三处：**签名算法（SHA256withRSA）、`timestamp
    用**商户私钥**做 SHA256withRSA 签名，`sign` 为 Base64，`sign_type=RSA`。
 4. 我们返回的响应（`mapi.php` / `api.php?act=order`）与回调都会带 `timestamp` 和平台私钥签名。
 
+**响应与回调的签名域**（接入方验签时按这个重建，别把整个 JSON 直接排序）：
+
+| 报文 | 参与签名的字段 |
+| :--- | :--- |
+| `mapi.php` 响应 | `code`、`trade_no`、`payurl`、`qrcode` + `timestamp` |
+| `api.php?act=order` 响应 | `code`、`pid`、`trade_no`、`out_trade_no`、`type`、`name`、`money`、`trade_status`、`addtime`、`endtime`、`param` + `timestamp` |
+| 异步回调 | `pid`、`trade_no`、`out_trade_no`、`type`、`name`、`money`、`trade_status`、`param` + `timestamp` |
+
+空值字段不参与签名（与本项目 V1 的待签串规则一致），`sign`/`sign_type` 永远排除。
+
 > 时间戳窗口是 **±300 秒**：超窗的请求即使签名正确也会按「签名错误」拒绝。
 > 商户服务器必须做 NTP 对时，偏差超过 5 分钟会表现为「签名错误」，极易误判成密钥配错。
 
