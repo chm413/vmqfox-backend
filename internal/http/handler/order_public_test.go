@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,5 +100,53 @@ func TestNewOrderHandlers(t *testing.T) {
 		if routeHandler == nil {
 			t.Errorf("订单处理器 %s 未装配", name)
 		}
+	}
+}
+
+// TestPublicOrderViewCarriesAlipayScheme 锁定支付宝转账确认单的接口透传。
+//
+// 这条链路此前只有 domain 单测（scheme 怎么拼），中段完全没门禁：
+// 哪天 apiOrderViewData 少赋一个字段，domain 用例照样全绿，
+// 而收银台会静默退回扫码——用户以为「点了没反应」，排障会去查前端。
+func TestPublicOrderViewCarriesAlipayScheme(t *testing.T) {
+	const scheme = "alipays://platformapi/startapp?appId=20000116&actionType=toAccount&account=pay%40example.com&amount=1.01"
+	view := apiOrderViewData(usecase.OrderView{
+		Order: order.Order{
+			Type:             payment.Alipay,
+			PriceCents:       100,
+			ReallyPriceCents: 101,
+			PriceText:        "1.00",
+			ReallyPriceText:  "1.01",
+			State:            order.StatusPending,
+			CreatedAt:        time.Unix(1_700_000_000, 0),
+		},
+		StateText:        "未支付",
+		TimeoutMinutes:   5,
+		RemainingSeconds: 300,
+		AlipayScheme:     scheme,
+	})
+
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatalf("编码公开订单响应失败: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("解析公开订单响应失败: %v", err)
+	}
+	if got, _ := data["alipayScheme"].(string); got != scheme {
+		t.Fatalf("公开订单响应必须带 alipayScheme，实际 %q", got)
+	}
+
+	// 未配置收款账号时为空串：收银台靠这个空值退回扫码，不能变成 undefined 或缺字段。
+	empty := apiOrderViewData(usecase.OrderView{
+		Order: order.Order{Type: payment.Alipay, State: order.StatusPending, CreatedAt: time.Unix(1_700_000_000, 0)},
+	})
+	emptyRaw, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("编码空 scheme 响应失败: %v", err)
+	}
+	if !strings.Contains(string(emptyRaw), `"alipayScheme":""`) {
+		t.Fatalf("未配置账号时应回空串（前端据此退回扫码），实际 %s", emptyRaw)
 	}
 }
