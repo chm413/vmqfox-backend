@@ -4,6 +4,7 @@ import {
   ReceiptText,
   QrCode,
   Smartphone,
+  Store,
   Activity,
   Settings,
   Send,
@@ -19,6 +20,7 @@ import { toast } from 'sonner'
 export type NavItem =
   | 'dashboard'
   | 'orders'
+  | 'merchants'
   | 'wechat-qrcodes'
   | 'alipay-qrcodes'
   | 'monitor'
@@ -35,6 +37,7 @@ interface AppShellProps {
 const navItems: { id: NavItem; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'dashboard', label: '总览看板', icon: LayoutDashboard },
   { id: 'orders', label: '订单管理', icon: ReceiptText },
+  { id: 'merchants', label: '商户管理', icon: Store },
   { id: 'wechat-qrcodes', label: '微信码库', icon: QrCode },
   { id: 'alipay-qrcodes', label: '支付宝码库', icon: Smartphone },
   { id: 'monitor', label: '监控端状态', icon: Activity },
@@ -127,7 +130,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentTab, onTabChange, chi
           </div>
           <div className="flex items-center gap-3">
             <span className="hidden sm:inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20">
-              单商户安全模式
+              EPay 多商户
             </span>
           </div>
         </header>

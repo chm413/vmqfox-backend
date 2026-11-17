@@ -191,10 +191,21 @@ func listOrdersAPIHandler(service OrderManager) gin.HandlerFunc {
 			state = &parsed
 		}
 
+		var merchantID *int64
+		if rawMerchant := strings.TrimSpace(c.Query("merchant_id")); rawMerchant != "" {
+			value, parseErr := strconv.ParseInt(rawMerchant, 10, 64)
+			if parseErr != nil || value < 0 {
+				c.JSON(http.StatusOK, php.NewEnvelope(400, "商户参数无效", nil))
+				return
+			}
+			merchantID = &value
+		}
+
 		result, err := service.List(c.Request.Context(), usecase.ListOrdersInput{
-			State: state,
-			Page:  page,
-			Limit: limit,
+			State:      state,
+			MerchantID: merchantID,
+			Page:       page,
+			Limit:      limit,
 		})
 		if err != nil {
 			writeOrderError(c, err)
@@ -471,6 +482,11 @@ func apiOrderRowData(value order.Order) gin.H {
 		"pay_date":     unixOrZero(value.PaidAt),
 		"close_date":   unixOrZero(value.ClosedAt),
 		"create_time":  value.CreatedAt.Format("2006-01-02 15:04:05"),
+		// 多商户维度：管理端要能按商户看单、区分原生与 EPay 单。
+		// 这里只回 id 与协议，商户名由前端用 /merchant/list 的映射表拼，
+		// 避免列表每行都去 join merchants（订单量大时是 N+1 的温床）。
+		"merchant_id": value.MerchantID,
+		"protocol":    int(value.Protocol),
 	}
 }
 

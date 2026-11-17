@@ -77,6 +77,10 @@ export interface OrderItem {
   pay_date: number
   close_date: number
   param?: string
+  /** 所属商户 ID；0 = 系统商户（多商户改造前的存量原生单）。 */
+  merchant_id: number
+  /** 0=VMQ 原生 1=EPay V1 2=EPay V2 */
+  protocol: number
 }
 
 export interface OrderListResponse {
@@ -85,8 +89,12 @@ export interface OrderListResponse {
 }
 
 export const orderApi = {
-  list: async (params: { page: number; limit: number; state?: number }) => {
-    const res = await api.get<ApiResponse<OrderListResponse>>('/order/list', { params })
+  list: async (params: { page: number; limit: number; state?: number; merchantId?: number }) => {
+    const { merchantId, ...rest } = params
+    const res = await api.get<ApiResponse<OrderListResponse>>('/order/list', {
+      // 后端按 snake_case 读 query；merchantId 为空时不传，避免被当成「筛选系统商户 0」
+      params: merchantId === undefined ? rest : { ...rest, merchant_id: merchantId },
+    })
     return res.data.data
   },
   reissue: async (id: number) => {
@@ -236,6 +244,73 @@ export interface CreateOrderResult {
   payUrl: string
   isAuto: number
   redirectUrl: string
+}
+
+// 商户管理模块（EPay 多商户）
+//
+// 契约以 internal/http/handler/merchant.go 的 apiMerchantViewData 为准，字段是 camelCase。
+// 三条硬约束必须在 UI 上体现，否则运营会以为「密钥丢了」：
+//   1. 明文密钥只在 create / rotateKey 的响应里出现一次，之后任何接口都拿不到；
+//   2. update 的 enabled 是必填 bool（后端 requiredBoolParam），不能省略；
+//   3. 轮换后旧密钥仍可验签（按代次保留），但商户端要尽快换成新密钥。
+export interface MerchantItem {
+  id: number
+  merchantNo: string
+  name: string
+  enabled: boolean
+  closeMinutes: number
+  note: string
+  v1Enabled: boolean
+  v2Enabled: boolean
+  /** 末 4 位，用于运营比对「商户配的是哪把」；不是密钥本身 */
+  v1Hint: string
+  v2Hint: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MerchantCreateResult extends MerchantItem {
+  /** 明文共享密钥，仅此一次 */
+  secret: string
+  hint: string
+  publicKey?: string
+}
+
+export interface MerchantRotateResult {
+  protocol: number
+  hint: string
+  /** V1 轮换才有明文共享密钥 */
+  secret?: string
+  /** V2 轮换才有平台公钥 */
+  publicKey?: string
+}
+
+export const merchantApi = {
+  list: async () => {
+    const res = await api.get<ApiResponse<{ total: number; items: MerchantItem[] }>>('/merchant/list')
+    return res.data.data
+  },
+  create: async (data: { name: string; closeMinutes?: number; note?: string }) => {
+    const res = await api.post<ApiResponse<MerchantCreateResult>>('/merchant/create', data)
+    return res.data.data
+  },
+  update: async (
+    id: number,
+    data: { name: string; enabled: boolean; closeMinutes?: number; note?: string }
+  ) => {
+    const res = await api.post<ApiResponse<MerchantItem>>(`/merchant/update/${id}`, data)
+    return res.data
+  },
+  rotateKey: async (id: number, protocol: 1 | 2) => {
+    const res = await api.post<ApiResponse<MerchantRotateResult>>(`/merchant/key/rotate/${id}`, {
+      protocol,
+    })
+    return res.data.data
+  },
+  publicKey: async (id: number) => {
+    const res = await api.get<ApiResponse<{ publicKey: string }>>(`/merchant/key/public/${id}`)
+    return res.data.data
+  },
 }
 
 export const publicPaymentApi = {

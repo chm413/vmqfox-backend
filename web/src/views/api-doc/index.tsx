@@ -1,6 +1,6 @@
 import React from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
-import { BookOpen, Code2, ShieldAlert, Webhook, ArrowLeftRight } from 'lucide-react'
+import { BookOpen, Code2, ShieldAlert, Webhook, ArrowLeftRight, Store } from 'lucide-react'
 
 /**
  * 商户对接文档。
@@ -117,6 +117,45 @@ export const ApiDocView: React.FC = () => {
               <div>
                 回跳地址只能通过 <code>return-url</code> 接口获取，且服务端仅在订单已支付时才签发；
                 公开订单响应本身不包含回跳地址、透传参数与通知地址。
+              </div>
+            </div>
+          </div>
+
+          {/* 5. EPay 商户接入 */}
+          <div className="space-y-3">
+            <h3 className="font-bold text-foreground flex items-center gap-1.5">
+              <Store className="size-4 text-primary" /> 5. EPay 商户接入（V1）
+            </h3>
+            <div className="text-xs text-muted-foreground leading-relaxed space-y-1.5">
+              <div>
+                在「商户管理」创建商户后，你会拿到 <code>商户号(pid)</code> 与一次性的
+                <code>商户密钥</code>。密钥只显示一次，丢失只能轮换。
+              </div>
+              <div>
+                我们的 EPay V1 与独角数卡等主流 EPay 插件兼容，三个入口都挂在根路径：
+              </div>
+            </div>
+            <div className="p-3 bg-muted/40 rounded-2xl border border-border/70 font-mono text-xs space-y-1">
+              <div><span className="text-emerald-600 dark:text-emerald-400 font-bold">GET</span> /submit.php —— 页面跳转下单</div>
+              <div><span className="text-emerald-600 dark:text-emerald-400 font-bold">POST</span> /mapi.php —— API 下单（返回 JSON 含 payurl/qrcode）</div>
+              <div><span className="text-emerald-600 dark:text-emerald-400 font-bold">GET</span> /api.php?act=order —— 查询单笔订单</div>
+            </div>
+            <div className="p-4 bg-muted/50 rounded-2xl border border-border/70 space-y-2 font-mono text-xs leading-relaxed">
+              <div className="text-muted-foreground">// V1 签名：参数名 ASCII 升序 + 原值拼接 + 末尾拼密钥，MD5 小写</div>
+              <div className="text-primary font-semibold break-all">
+                canonical = ksort(params) 后 "k1=v1&amp;k2=v2&amp;..." + key
+              </div>
+              <div>sign = md5(canonical)，回传 sign 与 sign_type=MD5</div>
+            </div>
+            <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-400 leading-relaxed space-y-1.5">
+              <div>
+                <b>参数值里不允许出现 &amp; 与控制字符</b>，否则请求会被判为「签名错误」。
+                业务数据请放进 <code>param</code> 并自行 URL 编码；<code>notify_url</code> 请只用路径，
+                不要带多个查询参数。
+              </div>
+              <div>
+                异步回调是 <b>GET</b>：我们会带 <code>pid/trade_no/out_trade_no/type/name/money/trade_status/sign/sign_type</code>
+                请求你的 <code>notify_url</code>，你返回纯文本 <code>success</code> 即视为送达。
               </div>
             </div>
           </div>

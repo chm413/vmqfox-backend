@@ -87,6 +87,9 @@ func (r *OrderRepository) List(ctx context.Context, filter port.OrderFilter) (po
 	if filter.State != nil {
 		query = query.Where("state = ?", int(*filter.State))
 	}
+	if filter.MerchantID != nil {
+		query = query.Where("merchant_id = ?", *filter.MerchantID)
+	}
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {

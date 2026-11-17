@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { orderApi } from '@/api'
+import { orderApi, merchantApi } from '@/api'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table'
@@ -21,10 +21,28 @@ export const OrdersView: React.FC = () => {
   const [page, setPage] = useState(1)
   const [limit] = useState(10)
   const [stateFilter, setStateFilter] = useState<number | undefined>(undefined)
+  /** 0 是「系统商户」（存量原生单），必须能与「不筛选」区分开，所以用 '' 表示不筛选 */
+  const [merchantFilter, setMerchantFilter] = useState<string>('')
+
+  // 商户名映射：列表接口只回 merchant_id，避免每行 join；商户数量很少，一次拉全量即可
+  const { data: merchants } = useQuery({
+    queryKey: ['merchants'],
+    queryFn: () => merchantApi.list(),
+  })
+  const merchantName = (id: number) => {
+    if (id === 0) return '系统商户'
+    return merchants?.items.find((m) => m.id === id)?.merchantNo ?? `#${id}`
+  }
 
   const { data, isLoading } = useQuery({
-    queryKey: ['orders-list', page, limit, stateFilter],
-    queryFn: () => orderApi.list({ page, limit, state: stateFilter }),
+    queryKey: ['orders-list', page, limit, stateFilter, merchantFilter],
+    queryFn: () =>
+      orderApi.list({
+        page,
+        limit,
+        state: stateFilter,
+        merchantId: merchantFilter === '' ? undefined : Number(merchantFilter),
+      }),
   })
 
   // 补单 Mutation
@@ -107,6 +125,24 @@ export const OrdersView: React.FC = () => {
           ))}
         </div>
 
+        {/* 商户筛选 */}
+        <select
+          value={merchantFilter}
+          onChange={(e) => {
+            setMerchantFilter(e.target.value)
+            setPage(1)
+          }}
+          className="h-8 rounded-xl border border-border bg-background px-2.5 text-xs text-muted-foreground"
+        >
+          <option value="">全部商户</option>
+          <option value="0">系统商户（原生）</option>
+          {merchants?.items.map((m) => (
+            <option key={m.id} value={String(m.id)}>
+              {m.merchantNo} · {m.name}
+            </option>
+          ))}
+        </select>
+
         {/* 批量处理按钮 */}
         <div className="flex items-center gap-2 flex-wrap">
           <Button
@@ -150,6 +186,7 @@ export const OrdersView: React.FC = () => {
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead>商户</TableHead>
                 <TableHead>商户单号 / 系统单号</TableHead>
                 <TableHead>支付渠道</TableHead>
                 <TableHead>标价 / 实付</TableHead>
@@ -161,13 +198,23 @@ export const OrdersView: React.FC = () => {
             <TableBody>
               {isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center py-10 text-muted-foreground">
+                  <TableCell colSpan={7} className="text-center py-10 text-muted-foreground">
                     数据加载中...
                   </TableCell>
                 </TableRow>
               ) : data?.items && data.items.length > 0 ? (
                 data.items.map((row) => (
                   <TableRow key={row.id}>
+                    <TableCell>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-xs">{merchantName(row.merchant_id)}</span>
+                        {row.protocol !== 0 && (
+                          <span className="inline-flex w-fit items-center px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-[10px] text-indigo-600">
+                            {row.protocol === 1 ? 'EPay V1' : 'EPay V2'}
+                          </span>
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-0.5">
                         <div className="font-semibold text-xs text-foreground flex items-center gap-1">
@@ -225,7 +272,7 @@ export const OrdersView: React.FC = () => {
                 ))
               ) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center py-12 text-muted-foreground text-xs">
+                  <TableCell colSpan={7} className="text-center py-12 text-muted-foreground text-xs">
                     暂无匹配的订单记录
                   </TableCell>
                 </TableRow>

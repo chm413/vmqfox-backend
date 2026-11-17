@@ -72,8 +72,12 @@ type SettingRepository interface {
 
 type OrderFilter struct {
 	State *order.Status
-	Page  int
-	Limit int
+	// MerchantID 非空时只返回该商户的订单；管理端按商户筛选使用。
+	// 取指针而不是 0 值哨兵：商户 0 是「系统商户」（存量原生单），
+	// 用 0 当「不筛选」会让系统商户的订单永远查不出来。
+	MerchantID *int64
+	Page       int
+	Limit      int
 }
 
 type OrderPage struct {

@@ -56,8 +56,10 @@ type OrderView struct {
 
 type ListOrdersInput struct {
 	State *order.Status
-	Page  int
-	Limit int
+	// MerchantID 非空时按商户筛选；nil 表示全部（含系统商户 0）。
+	MerchantID *int64
+	Page       int
+	Limit      int
 }
 
 type OrderPageView struct {
@@ -348,9 +350,10 @@ func (s *OrderService) List(ctx context.Context, input ListOrdersInput) (OrderPa
 		return OrderPageView{}, fail(CodeInvalidArgument, "订单状态无效")
 	}
 	page, err := s.orders.List(ctx, port.OrderFilter{
-		State: input.State,
-		Page:  input.Page,
-		Limit: input.Limit,
+		State:      input.State,
+		MerchantID: input.MerchantID,
+		Page:       input.Page,
+		Limit:      input.Limit,
 	})
 	if err != nil {
 		return OrderPageView{}, wrap(CodeDependency, "查询订单列表失败", err)

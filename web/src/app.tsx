@@ -4,6 +4,7 @@ import { AppShell, NavItem } from '@/components/app-shell'
 import { LoginView } from '@/views/login'
 import { DashboardView } from '@/views/dashboard'
 import { OrdersView } from '@/views/orders'
+import { MerchantsView } from '@/views/merchants'
 import { QrcodesView } from '@/views/qrcodes'
 import { MonitorView } from '@/views/monitor'
 import { SettingsView } from '@/views/settings'
@@ -28,6 +29,8 @@ export const App: React.FC = () => {
         // payment view
       } else if (hash === '#/orders') {
         setCurrentTab('orders')
+      } else if (hash === '#/merchants') {
+        setCurrentTab('merchants')
       } else if (hash === '#/wxqrcode' || hash === '#/qrcodes/wechat') {
         setCurrentTab('wechat-qrcodes')
       } else if (hash === '#/zfbqrcode' || hash === '#/qrcodes/alipay') {
@@ -54,6 +57,7 @@ export const App: React.FC = () => {
     setCurrentTab(tab)
     if (tab === 'dashboard') window.location.hash = '#/dashboard'
     else if (tab === 'orders') window.location.hash = '#/orders'
+    else if (tab === 'merchants') window.location.hash = '#/merchants'
     else if (tab === 'wechat-qrcodes') window.location.hash = '#/qrcodes/wechat'
     else if (tab === 'alipay-qrcodes') window.location.hash = '#/qrcodes/alipay'
     else if (tab === 'monitor') window.location.hash = '#/monitor'
@@ -84,6 +88,7 @@ export const App: React.FC = () => {
     <AppShell currentTab={currentTab} onTabChange={handleTabChange}>
       {currentTab === 'dashboard' && <DashboardView />}
       {currentTab === 'orders' && <OrdersView />}
+      {currentTab === 'merchants' && <MerchantsView />}
       {currentTab === 'wechat-qrcodes' && <QrcodesView type="wechat" />}
       {currentTab === 'alipay-qrcodes' && <QrcodesView type="alipay" />}
       {currentTab === 'monitor' && <MonitorView />}
