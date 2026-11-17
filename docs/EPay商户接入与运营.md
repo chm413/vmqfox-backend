@@ -43,11 +43,12 @@
 
 ### 3.2 签名规则
 
-1. 取所有参与签名的参数（**排除 `sign`、`sign_type`**）；
-2. 参数名按 **ASCII 升序**排列；
-3. 拼成 `k1=v1&k2=v2&...`，**值保持原样、不做 URL 编码**；
-4. 末尾直接拼上商户密钥：`...&k=v` + `key`；
-5. `sign = md5(...)` 小写 32 位，随请求回传 `sign` 与 `sign_type=MD5`。
+1. 剔除 `sign`、`sign_type`（**参数名精确小写匹配**，`Sign`/`SIGN` 这类变体一律拒绝而不是当普通参数）；
+2. **剔除值为空串的参数**——空串 ≠ `"0"`，`"0"` 与 `"0.00"` 必须保留；
+3. 参数名按 **ASCII 升序**排列（等价 PHP 的 `ksort`）；
+4. 拼成 `k1=v1&k2=v2&...`，**值保持原样：不做 URL 编码、不 trim**（签名域用解码后的原始值，组装发送串时才 urlencode）；
+5. 末尾直接拼上商户密钥：`...&k=v` + `key`（中间无分隔符）；
+6. `sign = md5(...)` 小写 32 位，随请求回传 `sign` 与 `sign_type=MD5`。
 
 ### 3.3 参数约束（会被拒绝的输入）
 
@@ -65,8 +66,11 @@
 支付成功后，平台以 **GET** 请求接入方的 `notify_url`，携带：
 
 ```
-pid, trade_no, out_trade_no, type, name, money, trade_status, sign, sign_type
+pid, trade_no, out_trade_no, type, name, money, trade_status, param, sign, sign_type
 ```
+
+- `trade_no` 是平台订单号，`out_trade_no` 是接入方自己的订单号（**对账主键**）；
+- `money` 回的是**下单金额**（`price`），不是实际到账金额——金额微调是平台内部核销手段，接入方记账请以自己下的金额为准。
 
 - 接入方处理成功必须返回**纯文本 `success`**（HTTP 200），其它响应视为失败；
 - 失败会重试并最终进入死信，管理台可用订单页的「补单」重新投递；
