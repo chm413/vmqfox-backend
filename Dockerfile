@@ -105,8 +105,12 @@ RUN chmod 0555 /usr/local/bin/vmqfox-entrypoint /usr/local/bin/vmqfox-api
 USER vmqfox:vmqfox
 EXPOSE 8080
 
+# HEALTHCHECK 必须跟随 VMQ_SERVER_PORT：写死 8080 时，凡是用该变量改端口的部署
+# （例如同机多实例、或 8080 被别的业务占用）容器会永远显示 unhealthy，
+# 即使 /health 实际返回 200——编排系统会误判并反复重启一个健康的实例。
+# shell 形式的 CMD 会在容器环境里展开变量，因此这里用 ${VAR:-default}。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/health || exit 1
+    CMD wget -q -O /dev/null "http://127.0.0.1:${VMQ_SERVER_PORT:-8080}/health" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/vmqfox-entrypoint"]
 CMD ["/usr/local/bin/vmqfox-api"]

@@ -58,7 +58,6 @@ export const MerchantsView: React.FC = () => {
 
   // 轮换
   const [rotateTarget, setRotateTarget] = useState<MerchantItem | null>(null)
-  const [rotateProtocol, setRotateProtocol] = useState<1 | 2>(1)
 
   // 一次性密钥 / 公钥展示
   const [secret, setSecret] = useState<SecretPayload | null>(null)
@@ -142,19 +141,6 @@ export const MerchantsView: React.FC = () => {
     onError: (err) => toast.error(err instanceof Error ? err.message : '轮换失败'),
   })
 
-  const publicKeyMutation = useMutation({
-    mutationFn: (item: MerchantItem) => merchantApi.publicKey(item.id),
-    onSuccess: (result, item) => {
-      setSecret({
-        title: '平台公钥',
-        merchantNo: item.merchantNo,
-        protocol: 2,
-        publicKey: result.publicKey,
-      })
-    },
-    onError: (err) => toast.error(err instanceof Error ? err.message : '获取公钥失败'),
-  })
-
   const openEdit = (item: MerchantItem) => {
     setEditTarget(item)
     setEditName(item.name)
@@ -164,8 +150,6 @@ export const MerchantsView: React.FC = () => {
 
   const openRotate = (item: MerchantItem) => {
     setRotateTarget(item)
-    // 已有 V2 才默认 V2，否则 V1——避免给未接入公钥的商户轮换出一把用不上的密钥
-    setRotateProtocol(item.v2Enabled ? 2 : 1)
   }
 
   return (
@@ -271,17 +255,6 @@ export const MerchantsView: React.FC = () => {
                         >
                           <KeyRound className="size-3.5" />
                         </Button>
-                        {item.v2Enabled && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-8 px-2 text-xs"
-                            onClick={() => publicKeyMutation.mutate(item)}
-                            disabled={publicKeyMutation.isPending}
-                          >
-                            <ShieldCheck className="size-3.5" />
-                          </Button>
-                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -410,19 +383,11 @@ export const MerchantsView: React.FC = () => {
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">协议版本</label>
-              <select
-                className="w-full h-9 rounded-xl border border-border bg-background px-3 text-xs"
-                value={rotateProtocol}
-                onChange={(e) => setRotateProtocol(Number(e.target.value) === 2 ? 2 : 1)}
-              >
-                <option value={1}>EPay V1（共享密钥，MD5）</option>
-                <option value={2}>EPay V2（RSA 平台公钥）</option>
-              </select>
-              {rotateProtocol === 2 && !rotateTarget?.v2Enabled && (
-                <p className="text-[11px] text-muted-foreground">
-                  该商户尚未配置 V2 公钥，轮换后将生成平台公钥供其配置。
-                </p>
-              )}
+              {/* V2（RSA 双向签名）尚未开放：后端没有 peer_public_key 写入入口，
+                  对未开通商户轮换必然失败。这里只保留 V1，不给运营一个点了必报错的入口。 */}
+              <div className="h-9 rounded-xl border border-border bg-muted/40 px-3 flex items-center text-xs text-muted-foreground">
+                EPay V1（共享密钥，MD5）
+              </div>
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setRotateTarget(null)}>
@@ -432,7 +397,7 @@ export const MerchantsView: React.FC = () => {
                 variant="destructive"
                 onClick={() =>
                   rotateTarget &&
-                  rotateMutation.mutate({ id: rotateTarget.id, protocol: rotateProtocol })
+                  rotateMutation.mutate({ id: rotateTarget.id, protocol: 1 })
                 }
                 disabled={rotateMutation.isPending}
               >

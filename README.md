@@ -35,6 +35,8 @@
 | `VMQ_TOKEN_SECRET` | *必填* | 至少 32 位的 JWT 签名密钥（离线生成随机值） |
 | `VMQ_TOKEN_ISSUER` | `vmqfox` | JWT Token 签发者名 |
 | `VMQ_TOKEN_TTL` | `24h` | JWT 凭据有效时长 |
+| `VMQ_MASTER_KEY` | 空（可选） | AES-256-GCM 主密钥（base64 32 字节），加密商户密钥用。留空服务可启动，但创建/轮换 EPay 商户会被拒绝；生成：`vmqfox-api -gen-master-key`。**必须离线备份：丢失等于全部商户密钥无法解密，只能逐一重新轮换** |
+| `VMQ_MASTER_KEY_OLD` | 空 | 上一代主密钥，仅在轮换主密钥时用于平滑迁移；配合 `VMQ_MASTER_KEY_VERSION`（默认 1）与 `VMQ_MASTER_KEY_OLD_VERSION` 使用 |
 | `VMQ_DB_HOST` | `127.0.0.1` | MySQL/MariaDB 主机地址 |
 | `VMQ_DB_PORT` | `3306` | MySQL/MariaDB 端口 |
 | `VMQ_DB_USER` | `vmqgo` | 数据库用户名 |

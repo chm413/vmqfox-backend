@@ -64,7 +64,7 @@ server { listen 80; server_name pay.your-domain.com; return 301 https://$host$re
 - 新建「网站」指向反代域名，开启 HTTPS 并强制跳转。
 - **不要**在面板里再添加 CORS 头或 `add_header` 安全头（Go 已统一下发，重复会冲突）。
 - 面板伪静态里保留 `X-Forwarded-Proto` 透传，参考上面的 nginx 片段。
-- epay 站点若与本服务同机，记得把 epay 内网地址加入 `VMQ_NOTIFY_ALLOW_CIDR`，否则异步回调会被 SSRF 防护拦截，订单永远停在未支付。详见[epay 商户插件](https://github.com/hulisang/vmqfox-backend/wiki/epay插件)。
+- epay 站点若与本服务同机，**不要**把 epay 内网地址加入 `VMQ_NOTIFY_ALLOW_CIDR` 来「打通」回调：出站通知的 SSRF 防护默认拒绝内网、回环与云元数据地址，加白名单等于给本机开一条打到自身内网的通道。正确做法是让商户把 `notify_url` 配成**公网可达的 HTTPS** 地址；被拦截的投递不会改变订单资金状态，而是进入死信，可在管理端核查后用「补单」重新投递。详见[EPay 商户接入与运营](EPay商户接入与运营.md) §3.4 与 §6。
 
 ## 健康检查
 

@@ -2,7 +2,7 @@
 
 # Docker Compose 一键部署（推荐）
 
-> 适用版本：V3.0 起（当前 V3.4）。compose 只启动 **两个服务**：`vmqfox-api`（内嵌 React 前端）与 `mysql`，不再有独立前端容器、Nginx 容器与 Redis。
+> 适用版本：V3.0 起（当前 V3.5）。compose 只启动 **两个服务**：`vmqfox-api`（内嵌 React 前端）与 `mysql`，不再有独立前端容器、Nginx 容器与 Redis。
 >
 > V3.4 起管理台新增 **商户管理**（EPay 多商户），升级时多一步数据库迁移，见[升级与迁移](升级与迁移.md)。
 > 镜像 tag 规则：`ghcr.io/chm413/vmqfox-backend:go-<版本>`（如 `go-v3.4`）、`go-dev`、`go-<commit>`。

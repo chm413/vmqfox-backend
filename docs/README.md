@@ -1,6 +1,6 @@
 # 部署文档（docs）
 
-本目录收录 Go-only 版（V3.0 起，当前 V3.4）的部署、升级与运营文档，以及设计方案，是 [项目 Wiki](https://github.com/hulisang/vmqfox-backend/wiki) 部署相关页面的离线副本，方便随源码仓库直接查阅；**部署类内容以 Wiki 为准，设计类文档以本目录为准**。
+本目录收录 Go-only 版（V3.0 起，当前 V3.5）的部署、升级与运营文档，以及设计方案，是 [项目 Wiki](https://github.com/hulisang/vmqfox-backend/wiki) 部署相关页面的离线副本，方便随源码仓库直接查阅；**部署类内容以 Wiki 为准，设计类文档以本目录为准**。
 
 | 文档 | 适用场景 |
 | :--- | :--- |

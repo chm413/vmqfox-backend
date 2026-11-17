@@ -66,8 +66,9 @@ export const ApiDocView: React.FC = () => {
               <div>sign = HMAC_SHA256(canonical, key) 的小写十六进制</div>
             </div>
             <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-400 leading-relaxed">
-              旧版 v1（MD5 拼接 <code>payId + param + type + price + key</code>）已停止受理。
-              服务端识别到 v1 签名会返回明确的升级提示，不会放行。
+              注意区分两套「v1」：这里指 <b>VMQ 原生协议</b>的旧版 MD5 签名
+              （<code>payId + param + type + price + key</code>），已停止受理，服务端会返回明确的升级提示；
+              下文第 5 节的 <b>EPay V1</b> 是另一套协议（独角数卡兼容，MD5 规则不同），两者互不影响。
             </div>
           </div>
 
@@ -154,7 +155,7 @@ export const ApiDocView: React.FC = () => {
                 不要带多个查询参数。
               </div>
               <div>
-                异步回调是 <b>GET</b>：我们会带 <code>pid/trade_no/out_trade_no/type/name/money/trade_status/sign/sign_type</code>
+                异步回调是 <b>GET</b>：我们会带 <code>pid/trade_no/out_trade_no/type/name/money/trade_status/param/sign/sign_type</code>
                 请求你的 <code>notify_url</code>，你返回纯文本 <code>success</code> 即视为送达。
               </div>
             </div>
