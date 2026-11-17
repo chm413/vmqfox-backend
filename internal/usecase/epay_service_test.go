@@ -842,7 +842,7 @@ func TestEPayCreateKeepsOriginalErrorWhenConflictIsNotReplayable(t *testing.T) {
 // TestEPayAuthenticateHidesKeyChainFailure 覆盖安全审计 P3：
 // 「密钥链路坏了」不得成为设计 §5.4 错误码表之外的第 4 个可区分状态 ——
 // 否则未鉴权者拿一个存在的 pid 发一次请求，就能判断「商户存在但密钥坏了」。
-// 对外必须与真正的验签失败同码同文案；「该商户未开通 V1 接口」保持不变（那是设计允许的状态）。
+// 对外必须与真正的验签失败同码同文案；「该商户未开通 EPay 接口」是设计允许的对外状态（V2 商户不该被说成未开通 V1）。
 func TestEPayAuthenticateHidesKeyChainFailure(t *testing.T) {
 	sign := "00000000000000000000000000000000"
 	params := map[string]string{"pid": testMerchantNo, "sign": sign}
@@ -874,8 +874,8 @@ func TestEPayAuthenticateHidesKeyChainFailure(t *testing.T) {
 	if code, _ := ErrorCodeOf(err); code != CodeConfiguration {
 		t.Fatalf("未开通 V1 应保留 CodeConfiguration，实际 code=%v err=%v", code, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "未开通 V1 接口") {
-		t.Fatalf("未开通 V1 的文案应保持不变，实际 %v", err)
+	if err == nil || !strings.Contains(err.Error(), "未开通 EPay 接口") {
+		t.Fatalf("未开通文案应为「未开通 EPay 接口」，实际 %v", err)
 	}
 }
 

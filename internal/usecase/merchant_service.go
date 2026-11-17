@@ -181,6 +181,9 @@ func (s *MerchantService) Create(ctx context.Context, input CreateMerchantInput)
 			}
 			return CreateMerchantResult{}, keyErr
 		}
+		// 这里不做「商户公钥 ≠ 平台公钥」校验：平台密钥对是本次创建才生成的，
+		// 调用方在提交前不可能预先知道这把公钥，该分支永远不可达。
+		// 真实误配发生在「更新」——商户此时已持有自己的平台公钥（见 updatePeerPublicKey）。
 		return CreateMerchantResult{
 			Merchant:     created,
 			PublicKeyPEM: string(publicPEM),
@@ -297,6 +300,13 @@ func (s *MerchantService) updatePeerPublicKey(ctx context.Context, merchantID in
 	normalized, err := merchant.NormalizeRSAPublicKeyPEM(raw)
 	if err != nil {
 		return fail(CodeInvalidArgument, "商户公钥无效："+err.Error())
+	}
+	// 与当前平台公钥比较：把平台公钥误填成商户公钥后，我方会用一把自己持有私钥的公钥
+	// 去验商户签名——构造上就是签名域碰撞的温床（当前字段集虽无可用链，但守卫成本极低）。
+	if platformPEM, platformErr := s.PlatformPublicKey(ctx, merchantID); platformErr == nil {
+		if merchant.PublicKeyPEMEqual(normalized, platformPEM) {
+			return fail(CodeInvalidArgument, "商户公钥不能是平台公钥")
+		}
 	}
 	if err := s.keys.UpdatePeerPublicKey(ctx, merchantID, merchant.ProtocolEPayV2, normalized); err != nil {
 		if errors.Is(err, port.ErrNotFound) {

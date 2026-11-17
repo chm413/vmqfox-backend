@@ -200,7 +200,7 @@ func (s *EPayService) Authenticate(ctx context.Context, params map[string]string
 	if len(v1Keys) == 0 && len(v2Keys) == 0 {
 		// 没有密钥行 == 该协议未开通（密钥本身就是开通凭据）。
 		// 文案沿用 V1 时期原文：存量调用方与测试依赖它，且「未开通」是设计允许的对外状态。
-		return merchant.Merchant{}, 0, fail(CodeConfiguration, "该商户未开通 V1 接口")
+		return merchant.Merchant{}, 0, fail(CodeConfiguration, "该商户未开通 EPay 接口")
 	}
 
 	// 轮换期商户仍在用上一代密钥签名，必须两代都试。

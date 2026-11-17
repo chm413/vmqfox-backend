@@ -676,3 +676,61 @@ func TestMerchantServiceUpdatePeerKeyRequiresV2(t *testing.T) {
 		t.Fatalf("失败时不得写入商户行，实际名称已变为 %q", stored.Name)
 	}
 }
+
+// TestMerchantServiceRejectsPlatformKeyAsPeerKey 锁定「商户公钥 ≠ 平台公钥」守卫。
+//
+// 现场最常见的误操作：商户已拿到自己的平台公钥，改配置时又把它贴进「商户公钥」框。
+// 两把公钥语义相反（一把验商户签名、一把给商户验我方签名），填反了双方都验不过，
+// 而报错只有「签名错误」，排查方向会完全跑偏。
+//
+// 创建路径不校验：平台密钥对是创建时才生成的，调用方提交前不可能知道这把公钥。
+func TestMerchantServiceRejectsPlatformKeyAsPeerKey(t *testing.T) {
+	box := newMerchantServiceTestBox(t)
+	service, _, _ := newMerchantServiceUnderTest(t, box)
+
+	_, peerPublic, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成商户密钥对失败: %v", err)
+	}
+	created, err := service.Create(context.Background(), CreateMerchantInput{
+		Name:          "V2 商户",
+		Protocol:      merchant.ProtocolEPayV2,
+		PeerPublicKey: string(peerPublic),
+	})
+	if err != nil {
+		t.Fatalf("创建 V2 商户失败: %v", err)
+	}
+
+	platformPEM, err := service.PlatformPublicKey(context.Background(), created.Merchant.ID)
+	if err != nil {
+		t.Fatalf("导出平台公钥失败: %v", err)
+	}
+	peerText := platformPEM
+	_, err = service.Update(context.Background(), created.Merchant.ID, UpdateMerchantInput{
+		Name:          "V2 商户",
+		Enabled:       true,
+		CloseMinutes:  30,
+		PeerPublicKey: &peerText,
+	})
+	if err == nil {
+		t.Fatal("把平台公钥当商户公钥必须拒绝")
+	}
+	if code, _ := ErrorCodeOf(err); code != CodeInvalidArgument {
+		t.Fatalf("应为 CodeInvalidArgument，实际 code=%v err=%v", code, err)
+	}
+
+	// 合法的新商户公钥仍然可以保存（守卫不能把正常路径也拦了）。
+	_, fresh, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成新商户密钥对失败: %v", err)
+	}
+	freshText := string(fresh)
+	if _, err := service.Update(context.Background(), created.Merchant.ID, UpdateMerchantInput{
+		Name:          "V2 商户",
+		Enabled:       true,
+		CloseMinutes:  30,
+		PeerPublicKey: &freshText,
+	}); err != nil {
+		t.Fatalf("合法公钥应能保存，实际 %v", err)
+	}
+}

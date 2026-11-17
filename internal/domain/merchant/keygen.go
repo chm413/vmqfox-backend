@@ -1,6 +1,7 @@
 package merchant
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -115,6 +116,31 @@ func HintPublicKey(publicPEM []byte) string {
 //
 // 同时做规范化：不同来源（openssl、Java keytool、在线工具）给出的 PEM 行宽、
 // 结尾换行、CRLF 都可能不同，规范化后 HintPublicKey 才稳定可比对。
+// PublicKeyPEMEqual 比较两把 PKIX PEM 公钥是否指向同一把密钥。
+//
+// 按 DER 字节比较而不是比 PEM 文本：行宽、结尾换行、CRLF 都可能不同，
+// 文本比较会把同一把密钥判成两把。解析失败一律返回 false（调用方按「不相等」处理，
+// 由各自的校验路径给出具体错误）。
+func PublicKeyPEMEqual(a, b string) bool {
+	da, ea := decodePKIXPublicKey(a)
+	db, eb := decodePKIXPublicKey(b)
+	if ea != nil || eb != nil {
+		return false
+	}
+	return bytes.Equal(da, db)
+}
+
+func decodePKIXPublicKey(pemText string) ([]byte, error) {
+	block, _ := pem.Decode([]byte(strings.TrimSpace(pemText)))
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, fmt.Errorf("不是 PEM 编码的 PUBLIC KEY")
+	}
+	if _, err := x509.ParsePKIXPublicKey(block.Bytes); err != nil {
+		return nil, err
+	}
+	return block.Bytes, nil
+}
+
 func NormalizeRSAPublicKeyPEM(pemText string) (string, error) {
 	text := strings.TrimSpace(strings.ReplaceAll(pemText, "\r\n", "\n"))
 	if text == "" {
