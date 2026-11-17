@@ -82,13 +82,32 @@ func (r *MerchantKeyRepository) FindActive(ctx context.Context, merchantID int64
 // 上一代旧公钥」的中间态，而验签会逐代尝试——旧私钥在这一刻仍然有效。
 // 单条 UPDATE 是原子的，不存在这个窗口。
 //
-// 不检查 RowsAffected：值未变化时 MySQL 的 affected 可能是 0（取决于 CLIENT_FOUND_ROWS），
-// 用 0 判断「未开通」会把「重复提交同一把公钥」误报成业务错误。
+// 关于 RowsAffected：值未变化时 MySQL 的 affected 可能是 0（取决于 CLIENT_FOUND_ROWS），
+// 直接拿 0 判「未开通」会把「重复提交同一把公钥」误报成业务错误。但也不能完全不管——
+// 键行被并发删掉时 UPDATE 影响 0 行却返回 nil，等于对外「保存成功」而公钥根本没写。
+// 因此 0 行时补一次 COUNT 区分「值未变」与「行不存在」。
 func (r *MerchantKeyRepository) UpdatePeerPublicKey(ctx context.Context, merchantID int64, protocol merchant.Protocol, peerPublicKey string) error {
-	return databaseFromContext(ctx, r.db).
-		Model(&MerchantKeyRow{}).
+	db := databaseFromContext(ctx, r.db)
+	result := db.Model(&MerchantKeyRow{}).
 		Where("merchant_id = ? AND protocol = ?", merchantID, int8(protocol)).
-		Update("peer_public_key", peerPublicKey).Error
+		Update("peer_public_key", peerPublicKey)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		return nil
+	}
+	var count int64
+	if err := db.Model(&MerchantKeyRow{}).
+		Where("merchant_id = ? AND protocol = ?", merchantID, int8(protocol)).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return port.ErrNotFound
+	}
+	// 行还在、值本来就等于目标值：幂等成功。
+	return nil
 }
 
 // FindAllForVerify 返回当前代与上一代（当前代在前），供验签逐一尝试。

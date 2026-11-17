@@ -301,13 +301,6 @@ func (s *MerchantService) updatePeerPublicKey(ctx context.Context, merchantID in
 	if err != nil {
 		return fail(CodeInvalidArgument, "商户公钥无效："+err.Error())
 	}
-	// 与当前平台公钥比较：把平台公钥误填成商户公钥后，我方会用一把自己持有私钥的公钥
-	// 去验商户签名——构造上就是签名域碰撞的温床（当前字段集虽无可用链，但守卫成本极低）。
-	if platformPEM, platformErr := s.PlatformPublicKey(ctx, merchantID); platformErr == nil {
-		if merchant.PublicKeyPEMEqual(normalized, platformPEM) {
-			return fail(CodeInvalidArgument, "商户公钥不能是平台公钥")
-		}
-	}
 	if err := s.keys.UpdatePeerPublicKey(ctx, merchantID, merchant.ProtocolEPayV2, normalized); err != nil {
 		if errors.Is(err, port.ErrNotFound) {
 			return fail(CodeInvalidState, "该商户未开通 EPay V2 接口")
@@ -384,6 +377,22 @@ func (s *MerchantService) Update(ctx context.Context, id int64, input UpdateMerc
 		}
 		if err := s.ensurePeerPublicKeyUpdatable(ctx, id); err != nil {
 			return MerchantView{}, err
+		}
+		// 平台公钥比较也必须在写商户行之前（与上面的解析校验同源，上一轮漏掉了这一条）：
+		// 否则「改名 + 误填平台公钥」会先落库再报 400，运营以为整次保存失败。
+		//
+		// 这里 fail-closed：拿不到平台公钥（主密钥缺失/私钥解不开）时直接拒绝更新，
+		// 不能因为「比较不了」就放行——那等于守卫在密钥故障时静默失效。
+		platformPEM, platformErr := s.PlatformPublicKey(ctx, id)
+		if platformErr != nil {
+			return MerchantView{}, platformErr
+		}
+		normalized, normErr := merchant.NormalizeRSAPublicKeyPEM(*input.PeerPublicKey)
+		if normErr != nil {
+			return MerchantView{}, fail(CodeInvalidArgument, "商户公钥无效："+normErr.Error())
+		}
+		if merchant.PublicKeyPEMEqual(normalized, platformPEM) {
+			return MerchantView{}, fail(CodeInvalidArgument, "商户公钥不能是平台公钥")
 		}
 	}
 

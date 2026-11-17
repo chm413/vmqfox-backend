@@ -108,14 +108,6 @@ func HintPublicKey(publicPEM []byte) string {
 	return hex.EncodeToString(sum[:])[:hintPublicKeyLength]
 }
 
-// NormalizeRSAPublicKeyPEM 校验并把商户提供的公钥规范化为 PKIX PEM。
-//
-// 为什么必须在这里校验而不是等到第一次验签：V2 的 peer_public_key 是「开通凭据」，
-// 存进库里的必须是一把能用的公钥。若允许存垃圾，商户下单时才报错，而对外只能回
-// 「签名错误」——运维会去查商户配置，实际是我方库里存了一坨坏数据，方向全错。
-//
-// 同时做规范化：不同来源（openssl、Java keytool、在线工具）给出的 PEM 行宽、
-// 结尾换行、CRLF 都可能不同，规范化后 HintPublicKey 才稳定可比对。
 // PublicKeyPEMEqual 比较两把 PKIX PEM 公钥是否指向同一把密钥。
 //
 // 按 DER 字节比较而不是比 PEM 文本：行宽、结尾换行、CRLF 都可能不同，
@@ -141,6 +133,14 @@ func decodePKIXPublicKey(pemText string) ([]byte, error) {
 	return block.Bytes, nil
 }
 
+// NormalizeRSAPublicKeyPEM 校验并把商户提供的公钥规范化为 PKIX PEM。
+//
+// 为什么必须在这里校验而不是等到第一次验签：V2 的 peer_public_key 是「开通凭据」，
+// 存进库里的必须是一把能用的公钥。若允许存垃圾，商户下单时才报错，而对外只能回
+// 「签名错误」——运维会去查商户配置，实际是我方库里存了一坨坏数据，方向全错。
+//
+// 同时做规范化：不同来源（openssl、Java keytool、在线工具）给出的 PEM 行宽、
+// 结尾换行、CRLF 都可能不同，规范化后 HintPublicKey 才稳定可比对。
 func NormalizeRSAPublicKeyPEM(pemText string) (string, error) {
 	text := strings.TrimSpace(strings.ReplaceAll(pemText, "\r\n", "\n"))
 	if text == "" {

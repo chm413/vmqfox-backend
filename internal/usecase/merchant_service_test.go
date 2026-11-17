@@ -686,7 +686,7 @@ func TestMerchantServiceUpdatePeerKeyRequiresV2(t *testing.T) {
 // 创建路径不校验：平台密钥对是创建时才生成的，调用方提交前不可能知道这把公钥。
 func TestMerchantServiceRejectsPlatformKeyAsPeerKey(t *testing.T) {
 	box := newMerchantServiceTestBox(t)
-	service, _, _ := newMerchantServiceUnderTest(t, box)
+	service, repo, _ := newMerchantServiceUnderTest(t, box)
 
 	_, peerPublic, err := merchant.NewRSAKeyPair()
 	if err != nil {
@@ -707,13 +707,18 @@ func TestMerchantServiceRejectsPlatformKeyAsPeerKey(t *testing.T) {
 	}
 	peerText := platformPEM
 	_, err = service.Update(context.Background(), created.Merchant.ID, UpdateMerchantInput{
-		Name:          "V2 商户",
-		Enabled:       true,
-		CloseMinutes:  30,
+		Name:          "改名不应生效",
+		Enabled:       false,
+		CloseMinutes:  5,
 		PeerPublicKey: &peerText,
 	})
 	if err == nil {
 		t.Fatal("把平台公钥当商户公钥必须拒绝")
+	}
+	// 守卫必须在写商户行之前：否则「改名 + 误填公钥」会先落库再报 400。
+	if stored := repo.items[created.Merchant.ID]; stored.Name != "V2 商户" || !stored.Enabled || stored.CloseMinutes != 0 {
+		t.Fatalf("失败时不得写入商户行，实际 name=%q enabled=%v close=%d",
+			stored.Name, stored.Enabled, stored.CloseMinutes)
 	}
 	if code, _ := ErrorCodeOf(err); code != CodeInvalidArgument {
 		t.Fatalf("应为 CodeInvalidArgument，实际 code=%v err=%v", code, err)

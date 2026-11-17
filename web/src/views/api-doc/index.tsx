@@ -179,7 +179,13 @@ export const ApiDocView: React.FC = () => {
             <div className="p-4 bg-muted/50 rounded-2xl border border-border/70 space-y-2 font-mono text-xs leading-relaxed">
               <div className="text-muted-foreground">// V2 待签串与 V1 同构：剔 sign/sign_type、剔空值、ASCII 升序、值不 urlencode</div>
               <div className="text-primary font-semibold break-all">
-                sign = base64( RSA_SHA256( canonical + timestamp ) )
+                canonical = ksort(params 含 timestamp) 后 "k1=v1&amp;k2=v2&amp;..."
+              </div>
+              <div className="text-primary font-semibold break-all">
+                sign = base64( RSA_SHA256( canonical ) )
+              </div>
+              <div className="text-amber-600 dark:text-amber-400">
+                // timestamp 是普通参数，参与 ASCII 排序；不要在末尾追加它
               </div>
             </div>
             <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-400 leading-relaxed space-y-1.5">
@@ -188,9 +194,14 @@ export const ApiDocView: React.FC = () => {
                 商户服务器必须做 NTP 对时，否则极易误判成密钥配错。
               </div>
               <div>
-                响应与回调都会带 <code>timestamp</code> 和平台私钥签名：<code>mapi.php</code> 签
+                <b>成功响应</b>带 <code>timestamp</code> 和平台私钥签名：<code>mapi.php</code> 签
                 <code>code/trade_no/payurl/qrcode</code>，<code>api.php</code> 签查单字段集，回调签
                 <code>pid/trade_no/out_trade_no/type/name/money/trade_status/param</code>；空值不参与签名。
+                <b>错误响应不签名</b>：先看 <code>code</code>，<code>code=1</code> 才验签。
+              </div>
+              <div>
+                V2 回调是 <b>POST + application/x-www-form-urlencoded</b>（V1 是 GET）。
+                回调端点必须接受 POST form，否则会 404/405，表现为「收不到回调」。
               </div>
               <div>
                 <b>接入前请先与商户联调确认调用地址</b>：本网关 V2 复用 V1 的

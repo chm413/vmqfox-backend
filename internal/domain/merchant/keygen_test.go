@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"strings"
 	"testing"
 
 	"github.com/hulisang/vmqfox-backend/internal/domain/secret"
@@ -289,5 +290,43 @@ func TestRSAKeyPair(t *testing.T) {
 	tampered := sha256.Sum256([]byte("pid=M0000000000000&money=12.51&timestamp=1773500000"))
 	if err := rsa.VerifyPKCS1v15(public, crypto.SHA256, tampered[:], signature); err == nil {
 		t.Fatal("篡改后的待签串仍验签通过")
+	}
+}
+
+// TestPublicKeyPEMEqual 锁定「按 DER 比较而非按文本比较」的语义：
+// 同一把公钥在不同工具/不同行宽下 PEM 文本不同，但必须是同一把；
+// 比较失败（非法输入）一律判不等，由调用方给出的具体错误负责解释。
+func TestPublicKeyPEMEqual(t *testing.T) {
+	_, firstPEM, err := NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成密钥对失败: %v", err)
+	}
+	_, secondPEM, err := NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成密钥对失败: %v", err)
+	}
+
+	// 同一把公钥的另一种排版：CRLF + 去掉末尾换行。
+	reflowed := strings.ReplaceAll(string(firstPEM), "\n", "\r\n")
+	reflowed = strings.TrimRight(reflowed, "\r\n")
+
+	cases := []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{name: "同一把", a: string(firstPEM), b: string(firstPEM), want: true},
+		{name: "排版不同但同一把", a: string(firstPEM), b: reflowed, want: true},
+		{name: "不同密钥", a: string(firstPEM), b: string(secondPEM), want: false},
+		{name: "非法 PEM", a: string(firstPEM), b: "not-a-pem", want: false},
+		{name: "空串", a: string(firstPEM), b: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PublicKeyPEMEqual(tc.a, tc.b); got != tc.want {
+				t.Fatalf("PublicKeyPEMEqual 期望 %v，实际 %v", tc.want, got)
+			}
+		})
 	}
 }

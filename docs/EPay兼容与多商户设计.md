@@ -21,10 +21,10 @@
 
 | 项 | 决策 |
 | :-- | :-- |
-| 协议角色 | 本网关**扮演 EPay 平台侧**，对外提供 `submit.php` / `mapi.php` / `api.php` 与 V2 的 `/api/pay/*` |
+| 协议角色 | 本网关**扮演 EPay 平台侧**，对外提供 `submit.php` / `mapi.php` / `api.php`（V2 复用这三个入口，**未实现** `/api/pay/*`） |
 | 商户模型 | **多商户但站内自控**：内部自增 `id` 作主键，对外用随机 `merchant_no` 作 `pid`；只存名称/启停/备注，订单按商户隔离 |
 | 商户范围 | **不开放自助注册**。商户由运营者在管理端手工创建，可以是运营者自己的多个站点，也可以是合作方站点（见 §0.3） |
-| 协议版本 | **V1（MD5）先上线；V2（SHA256WithRSA）按彩虹/ezfp 系实现**：字段与 V1 同构、新增 `timestamp`、改用 `/api/pay/*`（见 §6.2、附录 C） |
+| 协议版本 | **V1（MD5）与 V2（SHA256WithRSA）均已交付**：V2 字段与 V1 同构、新增 `timestamp`、复用同一组入口（`/api/pay/*` **未实现**，见 §5.1 与附录 C） |
 | VMQ 原生接口 | **保留不动**，与 EPay 双协议并存 |
 | 收款码 | 所有商户**共用同一批** `qrcodes`，这是免签系统的物理前提 |
 | 金额锁 | `price_locks` 主键**保持全局唯一**，不引入商户维度（物理约束，见 §3.1） |
@@ -71,8 +71,8 @@
 
 | 写法 | 指什么 | 签名 | 现状 |
 | :-- | :-- | :-- | :-- |
-| **EPay V1** | 本文新增，易支付旧版商户协议 | MD5，密钥拼在待签串末尾 | 待实现 |
-| **EPay V2** | 本文新增，易支付新版商户协议 | SHA256WithRSA 双向 + `timestamp` | 待实现（按彩虹/ezfp 系） |
+| **EPay V1** | 易支付旧版商户协议 | MD5，密钥拼在待签串末尾 | 已交付（V3.4） |
+| **EPay V2** | 易支付新版商户协议 | SHA256WithRSA 双向 + `timestamp` | 已交付（V3.6，按彩虹/ezfp 系；真实报文联调仍需逐户确认） |
 | **VMQ v2** | 仓库现有，`/api/order/create` 等用的协议 | HMAC-SHA-256，密钥作 HMAC key | 已在生产运行 |
 
 `payment.SignVersion2`、`CreateSignV2`、Wiki 的「签名协议 v2」、以及报错文案
@@ -245,7 +245,7 @@ CREATE TABLE merchant_keys (
   不能用 `generation=1` 的公钥统一验旧签名。签发与回调签名只用 `generation=1`。
 - **轮换平台密钥时 `peer_public_key` 必须原样带入新代**（见 §4.4）。否则商户入站请求会全部验签失败。
 - **协议开通判定**：`SELECT 1 FROM merchant_keys WHERE merchant_id=? AND protocol=? AND generation=1`。
-  查不到即返回「该商户未开通 V1/V2 接口」，无需额外的布尔开关。
+  查不到即返回「该商户未开通 EPay 接口」，无需额外的布尔开关。
 - 两代制牺牲了「保留三代以上做长期灰度」的能力。对这个场景够用：
   商户数量有限，轮换可以配合通知一次性完成。
 
@@ -550,6 +550,7 @@ POST     /mapi.php            API 支付，返回 JSON
 GET|POST /api.php             act=order（查单）；其余 act 明确不实现
 
 # EPay V2（彩虹/ezfp 系，见附录 C）
+# 以下 /api/pay/* 属彩虹/ezfp 文档中的路径，本实现**未提供**，V2 复用上面三个入口
 POST     /api/pay/create      统一下单
 POST     /api/pay/query       查询
 POST     /api/pay/close       关单
@@ -671,7 +672,7 @@ GET      /api/merchant/key/public/:id      # 只导出平台公钥（V2）
 | 成功 | `1` | 空或 `success` |
 | 签名错误 | `-1` | `签名错误` |
 | 商户不存在/停用 | `-1` | `商户不存在` |
-| 协议未开通 | `-1` | `该商户未开通 V1/V2 接口` |
+| 协议未开通 | `-1` | `该商户未开通 EPay 接口`（历史上曾为「未开通 V1 接口」，V3.6 起统一） |
 | 支付方式未开通 | `-1` | `支付方式未开通` |
 | 接口未实现（query/refund/settle） | `-1` | `接口未开通` |
 | 金额非法 | `-1` | `金额格式错误` |

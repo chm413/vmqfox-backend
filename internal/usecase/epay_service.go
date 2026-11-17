@@ -312,6 +312,10 @@ func (s *EPayService) Create(ctx context.Context, input EPayCreateInput) (EPayCr
 	// 孤儿单（要等到 close_minutes 才释放）。宁可下单前失败。
 	if protocol == merchant.ProtocolEPayV2 {
 		if _, err := merchantV2PrivateKey(ctx, s.merchantKeys, s.masterKeys, input.MerchantID); err != nil {
+			// 对外文案与「监控端离线」相同（不泄露内部原因），但真实原因必须留日志：
+			// 否则线上只能看到「收款通道异常」，无法区分是主密钥配错、密钥缺失还是解密失败。
+			// 复用限流器：同一商户的确定性故障只记一次，避免探测流量刷满日志。
+			s.warnKeyChainOnce(input.MerchantID, "V2 响应签名不可用", err)
 			return EPayCreateResult{}, fail(CodeConfiguration, "收款通道异常")
 		}
 	}

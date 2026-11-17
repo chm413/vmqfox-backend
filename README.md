@@ -258,6 +258,10 @@ Release 包 `vmqfox-backend-V3.2.tar.gz` 内含 `vmqfox-api-windows-amd64.exe`�
 
 ### 5. 签名协议 v2（HMAC-SHA-256）
 
+> 名称辨析：这里的 **v2** 指**本网关原生协议**（`/api/order/create`）的签名版本，
+> 与商户接入用的 **EPay V2**（RSA 双向签名，走 `submit.php`/`mapi.php`/`api.php`）是两套完全独立的协议。
+> 三入口与签名规则见 [EPay 商户接入与运营](docs/EPay商户接入与运营.md)。
+
 通讯密钥作为 HMAC 密钥参与运算，不再拼接进签名明文；结果取 64 位小写 hex，服务端以常量时间比较。
 v1 的 MD5 签名已停止受理，仅保留用于识别未升级的旧 SDK 并给出明确报错。
 
