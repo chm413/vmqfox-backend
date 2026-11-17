@@ -123,6 +123,53 @@ func doMerchantRequestRecorded(t *testing.T, engine *gin.Engine, method, path, b
 	return envelope, data, recorder
 }
 
+// TestCreateMerchantHandlerPassesV2Params 覆盖 V2 开通的接口透传：
+// protocol=2 与 peerPublicKey 必须原样进用例层，响应里必须带平台公钥。
+// 这条用例防的是「UI 能选 V2、后端却仍按 V1 建」这类静默降级——
+// 现象会是商户拿到一把不存在的共享密钥，而库里没有 V2 密钥行。
+func TestCreateMerchantHandlerPassesV2Params(t *testing.T) {
+	const platformPublicKey = "-----BEGIN PUBLIC KEY-----\nZm9v\n-----END PUBLIC KEY-----"
+	const peerPublicKey = "-----BEGIN PUBLIC KEY-----\nYmFy\n-----END PUBLIC KEY-----"
+	service := &merchantHandlerTestService{
+		createResult: usecase.CreateMerchantResult{
+			Merchant: merchant.Merchant{
+				ID:           8,
+				No:           "M8RY8AQTE9PG99",
+				Name:         "V2 站",
+				Enabled:      true,
+				CloseMinutes: 30,
+				CreatedAt:    time.Unix(1_700_000_000, 0).UTC(),
+				UpdatedAt:    time.Unix(1_700_000_000, 0).UTC(),
+			},
+			PublicKeyPEM: platformPublicKey,
+			SecretHint:   "abcd1234abcd1234",
+		},
+	}
+	engine := merchantTestEngine(service)
+
+	envelope, data := doMerchantRequest(t, engine, http.MethodPost, "/api/merchant/create",
+		`{"name":"V2 站","protocol":2,"peerPublicKey":"-----BEGIN PUBLIC KEY-----\nYmFy\n-----END PUBLIC KEY-----"}`)
+	if envelope.Code != 200 {
+		t.Fatalf("V2 创建应成功，实际 code=%d msg=%q", envelope.Code, envelope.Msg)
+	}
+	if service.createInput.Protocol != merchant.ProtocolEPayV2 {
+		t.Fatalf("protocol=2 必须透传到用例层，实际 %v", service.createInput.Protocol)
+	}
+	if service.createInput.PeerPublicKey != peerPublicKey {
+		t.Fatalf("peerPublicKey 必须透传，实际 %q", service.createInput.PeerPublicKey)
+	}
+	if data["publicKey"] != platformPublicKey {
+		t.Fatalf("V2 创建响应必须带平台公钥，实际 %v", data["publicKey"])
+	}
+
+	// 非法 protocol 必须被拒，而不是静默按 V1 处理。
+	envelope, _ = doMerchantRequest(t, engine, http.MethodPost, "/api/merchant/create",
+		`{"name":"坏协议","protocol":9}`)
+	if envelope.Code != 400 {
+		t.Fatalf("非法协议应返回 400，实际 code=%d msg=%q", envelope.Code, envelope.Msg)
+	}
+}
+
 // TestCreateMerchantHandlerReturnsSecretOnce 断言明文只出现在创建响应里，且参数被正确透传。
 func TestCreateMerchantHandlerReturnsSecretOnce(t *testing.T) {
 	const secret = "abcdefghjkmnpqrstuvwxyz23456789"

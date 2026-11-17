@@ -290,13 +290,28 @@ export const merchantApi = {
     const res = await api.get<ApiResponse<{ total: number; items: MerchantItem[] }>>('/merchant/list')
     return res.data.data
   },
-  create: async (data: { name: string; closeMinutes?: number; note?: string }) => {
+  create: async (data: {
+    name: string
+    closeMinutes?: number
+    note?: string
+    /** 1=V1（默认，共享密钥）；2=V2（RSA 双向签名，需要商户公钥） */
+    protocol?: number
+    /** 仅 V2：接入方的 RSA 公钥（PKIX PEM）。V2 的「开通凭据」，缺了验不了签。 */
+    peerPublicKey?: string
+  }) => {
     const res = await api.post<ApiResponse<MerchantCreateResult>>('/merchant/create', data)
     return res.data.data
   },
   update: async (
     id: number,
-    data: { name: string; enabled: boolean; closeMinutes?: number; note?: string }
+    data: {
+      name: string
+      enabled: boolean
+      closeMinutes?: number
+      note?: string
+      /** 传了才改公钥；不传表示不动。改公钥不需要轮换平台密钥。 */
+      peerPublicKey?: string
+    }
   ) => {
     const res = await api.post<ApiResponse<MerchantItem>>(`/merchant/update/${id}`, data)
     return res.data

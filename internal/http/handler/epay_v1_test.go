@@ -35,15 +35,20 @@ type stubEPayManager struct {
 	queryOutTradeNo string
 }
 
-func (m *stubEPayManager) Authenticate(context.Context, map[string]string) (merchant.Merchant, error) {
+func (m *stubEPayManager) Authenticate(context.Context, map[string]string) (merchant.Merchant, merchant.Protocol, error) {
 	m.authCalls++
 	if m.authErr != nil {
-		return merchant.Merchant{}, m.authErr
+		return merchant.Merchant{}, 0, m.authErr
 	}
 	if m.identity.ID == 0 {
-		return merchant.Merchant{ID: 7, No: "M7K3QPX9Z2AB4C", Enabled: true}, nil
+		return merchant.Merchant{ID: 7, No: "M7K3QPX9Z2AB4C", Enabled: true}, merchant.ProtocolEPayV1, nil
 	}
-	return m.identity, nil
+	return m.identity, merchant.ProtocolEPayV1, nil
+}
+
+// SignEPayResponse：stub 只验证接线（V1 用例不会走到 V2 分支），固定返回可辨识的值。
+func (m *stubEPayManager) SignEPayResponse(context.Context, int64, map[string]string) (string, string, error) {
+	return "1700000000", "stub-sign", nil
 }
 
 func (m *stubEPayManager) Create(_ context.Context, input usecase.EPayCreateInput) (usecase.EPayCreateResult, error) {

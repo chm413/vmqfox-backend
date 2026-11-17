@@ -529,7 +529,7 @@ func TestEPayAuthenticateGoldenVector(t *testing.T) {
 		"sign_type":    "MD5",
 	}
 
-	identity, err := service.Authenticate(context.Background(), params)
+	identity, _, err := service.Authenticate(context.Background(), params)
 	if err != nil {
 		t.Fatalf("黄金用例应验签通过，实际 err=%v", err)
 	}
@@ -542,7 +542,7 @@ func TestEPayAuthenticateGoldenVector(t *testing.T) {
 		tampered[name] = value
 	}
 	tampered["money"] = "13.50"
-	if _, err := service.Authenticate(context.Background(), tampered); err == nil {
+	if _, _, err := service.Authenticate(context.Background(), tampered); err == nil {
 		t.Fatal("篡改金额后必须验签失败")
 	} else if code, _ := ErrorCodeOf(err); code != CodeInvalidSignature {
 		t.Fatalf("应返回 CodeInvalidSignature，实际 code=%v err=%v", code, err)
@@ -580,7 +580,7 @@ func TestEPayAuthenticateAcceptsPreviousGeneration(t *testing.T) {
 	params["sign"] = sign
 	params["sign_type"] = "MD5"
 
-	if _, err := service.Authenticate(context.Background(), params); err != nil {
+	if _, _, err := service.Authenticate(context.Background(), params); err != nil {
 		t.Fatalf("上一代密钥应能通过验签，实际 err=%v", err)
 	}
 }
@@ -591,11 +591,11 @@ func TestEPayAuthenticateHidesMerchantState(t *testing.T) {
 	service, _ := epayV1TestService(t, nil)
 	params := map[string]string{"pid": "MNOTEXIST00000", "sign": "00000000000000000000000000000000"}
 
-	_, missingErr := service.Authenticate(context.Background(), params)
+	_, _, missingErr := service.Authenticate(context.Background(), params)
 	if missingErr == nil {
 		t.Fatal("不存在的商户必须拒绝")
 	}
-	if _, err := service.Authenticate(context.Background(), map[string]string{"pid": testMerchantNo}); err == nil {
+	if _, _, err := service.Authenticate(context.Background(), map[string]string{"pid": testMerchantNo}); err == nil {
 		t.Fatal("缺 sign 也必须拒绝")
 	}
 	if code, _ := ErrorCodeOf(missingErr); code != CodeInvalidArgument {
@@ -849,7 +849,7 @@ func TestEPayAuthenticateHidesKeyChainFailure(t *testing.T) {
 	// 对照：该商户确实没有 V1 密钥行 == 未开通，仍是设计允许的对外状态。
 	service, _ = epayV1TestService(t, nil)
 	service.merchantKeys = epayV1Keys{verify: map[string][]merchant.Key{}}
-	_, err := service.Authenticate(context.Background(), params)
+	_, _, err := service.Authenticate(context.Background(), params)
 	if code, _ := ErrorCodeOf(err); code != CodeConfiguration {
 		t.Fatalf("未开通 V1 应保留 CodeConfiguration，实际 code=%v err=%v", code, err)
 	}
@@ -860,7 +860,7 @@ func TestEPayAuthenticateHidesKeyChainFailure(t *testing.T) {
 
 func assertSignatureError(t *testing.T, service *EPayService, params map[string]string, scene string) {
 	t.Helper()
-	_, err := service.Authenticate(context.Background(), params)
+	_, _, err := service.Authenticate(context.Background(), params)
 	if code, _ := ErrorCodeOf(err); code != CodeInvalidSignature {
 		t.Fatalf("%s：对外必须是 CodeInvalidSignature，实际 code=%v err=%v", scene, code, err)
 	}

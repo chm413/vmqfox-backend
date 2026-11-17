@@ -49,6 +49,9 @@ export const MerchantsView: React.FC = () => {
   const [createName, setCreateName] = useState('')
   const [createClose, setCreateClose] = useState('30')
   const [createNote, setCreateNote] = useState('')
+  /** 1=V1 共享密钥（默认）；2=V2 RSA 双向签名，需要商户公钥 */
+  const [createProtocol, setCreateProtocol] = useState<1 | 2>(1)
+  const [createPeerKey, setCreatePeerKey] = useState('')
 
   // 编辑
   const [editTarget, setEditTarget] = useState<MerchantItem | null>(null)
@@ -58,6 +61,7 @@ export const MerchantsView: React.FC = () => {
 
   // 轮换
   const [rotateTarget, setRotateTarget] = useState<MerchantItem | null>(null)
+  const [rotateProtocol, setRotateProtocol] = useState<1 | 2>(1)
 
   // 一次性密钥 / 公钥展示
   const [secret, setSecret] = useState<SecretPayload | null>(null)
@@ -70,6 +74,9 @@ export const MerchantsView: React.FC = () => {
         name: createName.trim(),
         closeMinutes: Number(createClose) || 0,
         note: createNote.trim(),
+        protocol: createProtocol,
+        // V1 不传公钥：多传一个空字段会让后端误以为要在 V1 上校验公钥。
+        peerPublicKey: createProtocol === 2 ? createPeerKey.trim() : undefined,
       }),
     onSuccess: (result) => {
       toast.success(`商户 ${result.merchantNo} 已创建`)
@@ -77,17 +84,34 @@ export const MerchantsView: React.FC = () => {
       setCreateName('')
       setCreateClose('30')
       setCreateNote('')
+      setCreatePeerKey('')
+      const createdProtocol = createProtocol
+      setCreateProtocol(1)
       invalidate()
       setSecret({
-        title: '商户已创建 — 请立即保存密钥',
+        title: createdProtocol === 2 ? '商户已创建 — 请把平台公钥交给商户' : '商户已创建 — 请立即保存密钥',
         merchantNo: result.merchantNo,
-        protocol: 1,
+        protocol: createdProtocol,
         secret: result.secret,
         publicKey: result.publicKey,
         hint: result.hint,
       })
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : '创建失败'),
+  })
+
+  // 查看平台公钥：V2 商户把平台公钥配到自己面板用，可反复导出（不是一次性机密）。
+  const publicKeyMutation = useMutation({
+    mutationFn: (item: MerchantItem) => merchantApi.publicKey(item.id),
+    onSuccess: (result, item) => {
+      setSecret({
+        title: '平台公钥',
+        merchantNo: item.merchantNo,
+        protocol: 2,
+        publicKey: result.publicKey,
+      })
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : '获取公钥失败'),
   })
 
   const updateMutation = useMutation({
@@ -150,6 +174,8 @@ export const MerchantsView: React.FC = () => {
 
   const openRotate = (item: MerchantItem) => {
     setRotateTarget(item)
+    // 已开通 V2 才默认 V2，否则 V1——避免给未接入的商户轮换出一把用不上的密钥。
+    setRotateProtocol(item.v2Enabled ? 2 : 1)
   }
 
   return (
@@ -255,6 +281,18 @@ export const MerchantsView: React.FC = () => {
                         >
                           <KeyRound className="size-3.5" />
                         </Button>
+                        {item.v2Enabled && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs"
+                            onClick={() => publicKeyMutation.mutate(item)}
+                            disabled={publicKeyMutation.isPending}
+                            title="查看平台公钥"
+                          >
+                            <ShieldCheck className="size-3.5" />
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -287,6 +325,35 @@ export const MerchantsView: React.FC = () => {
               />
             </div>
             <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">协议版本</label>
+              <select
+                className="w-full h-9 rounded-xl border border-border bg-background px-3 text-xs"
+                value={createProtocol}
+                onChange={(e) => setCreateProtocol(Number(e.target.value) === 2 ? 2 : 1)}
+              >
+                <option value={1}>EPay V1（共享密钥，MD5）</option>
+                <option value={2}>EPay V2（RSA 双向签名）</option>
+              </select>
+            </div>
+            {createProtocol === 2 && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  商户公钥（PKIX PEM，必填）
+                </label>
+                <textarea
+                  value={createPeerKey}
+                  onChange={(e) => setCreatePeerKey(e.target.value)}
+                  rows={6}
+                  placeholder={'-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----'}
+                  className="w-full rounded-xl border border-border bg-muted/40 p-3 font-mono text-[10px] leading-relaxed"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  V2 是双向签名：这把公钥用来验商户发来的请求。至少要 2048 位 RSA，
+                  由商户用自己的工具生成，私钥不要给我们。
+                </p>
+              </div>
+            )}
+            <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">
                 订单有效期（分钟，0 = 跟随系统全局）
               </label>
@@ -306,8 +373,17 @@ export const MerchantsView: React.FC = () => {
               />
             </div>
             <p className="text-[11px] text-muted-foreground leading-relaxed">
-              创建后会自动下发一把 V1 共享密钥，<strong>明文只在下一步显示一次</strong>，
-              请当场复制到商户后台。
+              {createProtocol === 2 ? (
+                <>
+                  创建后会生成平台 RSA 密钥对：<strong>平台公钥在下一步显示</strong>，
+                  交给商户配置即可（可反复导出，不是一次性机密）。
+                </>
+              ) : (
+                <>
+                  创建后会自动下发一把 V1 共享密钥，<strong>明文只在下一步显示一次</strong>，
+                  请当场复制到商户后台。
+                </>
+              )}
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setCreateOpen(false)}>
@@ -315,9 +391,13 @@ export const MerchantsView: React.FC = () => {
               </Button>
               <Button
                 onClick={() => createMutation.mutate()}
-                disabled={!createName.trim() || createMutation.isPending}
+                disabled={
+                  !createName.trim() ||
+                  (createProtocol === 2 && !createPeerKey.trim()) ||
+                  createMutation.isPending
+                }
               >
-                创建并生成密钥
+                {createProtocol === 2 ? '创建并生成平台密钥' : '创建并生成密钥'}
               </Button>
             </div>
           </div>
@@ -383,11 +463,19 @@ export const MerchantsView: React.FC = () => {
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">协议版本</label>
-              {/* V2（RSA 双向签名）尚未开放：后端没有 peer_public_key 写入入口，
-                  对未开通商户轮换必然失败。这里只保留 V1，不给运营一个点了必报错的入口。 */}
-              <div className="h-9 rounded-xl border border-border bg-muted/40 px-3 flex items-center text-xs text-muted-foreground">
-                EPay V1（共享密钥，MD5）
-              </div>
+              <select
+                className="w-full h-9 rounded-xl border border-border bg-background px-3 text-xs"
+                value={rotateProtocol}
+                onChange={(e) => setRotateProtocol(Number(e.target.value) === 2 ? 2 : 1)}
+              >
+                <option value={1}>EPay V1（共享密钥，MD5）</option>
+                <option value={2}>EPay V2（RSA 平台公钥）</option>
+              </select>
+              {rotateProtocol === 2 && !rotateTarget?.v2Enabled && (
+                <p className="text-[11px] text-amber-600">
+                  该商户未开通 V2，轮换会被拒绝。请先在创建时选择 V2 并录入商户公钥。
+                </p>
+              )}
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setRotateTarget(null)}>
@@ -397,7 +485,7 @@ export const MerchantsView: React.FC = () => {
                 variant="destructive"
                 onClick={() =>
                   rotateTarget &&
-                  rotateMutation.mutate({ id: rotateTarget.id, protocol: 1 })
+                  rotateMutation.mutate({ id: rotateTarget.id, protocol: rotateProtocol })
                 }
                 disabled={rotateMutation.isPending}
               >

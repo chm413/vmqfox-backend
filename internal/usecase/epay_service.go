@@ -152,66 +152,97 @@ func NewEPayService(deps EPayServiceDeps) (*EPayService, error) {
 //
 // 文案遵守设计 §5.4：商户不存在与停用返回同一句话（避免 pid 变成存在性探针）；
 // 参数歧义与验签失败对外完全一致（避免「参数有问题」被误诊成「密钥配错」）。
-func (s *EPayService) Authenticate(ctx context.Context, params map[string]string) (merchant.Merchant, error) {
+// epayTimestampSkew 是 V2 入站时间戳允许的偏差（设计 §5.5 #6 / §9：±300s）。
+// 只在 V2 分支使用：V1 没有 timestamp，套用会把所有存量请求判成过期。
+const epayTimestampSkew = 300 * time.Second
+
+// Authenticate 校验 EPay 请求签名，返回商户身份与**验签通过的协议**。
+//
+// 协议必须回传：下单要把 protocol 落到 orders，回调签名按它选密钥（V1 共享密钥 /
+// V2 平台私钥）。这里固定写 V1 或靠报文里的 sign_type 猜，都是「商户收到验不过的回调」。
+//
+// 为什么两套协议都试而不是按 sign_type 分流：sign_type 是报文里的值，谁都能改；
+// 用它决定验签算法等于让攻击者选择验签方式。这里按「商户实际开通了哪些协议」决定
+// 尝试顺序，V1 在前（存量商户占绝大多数，命中率最高）。
+//
+// 文案遵守设计 §5.4：商户不存在与停用返回同一句话（避免 pid 变成存在性探针）；
+// 参数歧义与验签失败对外完全一致（避免「参数有问题」被误诊成「密钥配错」）。
+func (s *EPayService) Authenticate(ctx context.Context, params map[string]string) (merchant.Merchant, merchant.Protocol, error) {
 	pid := strings.TrimSpace(params["pid"])
 	if pid == "" {
-		return merchant.Merchant{}, fail(CodeInvalidArgument, "商户不存在")
+		return merchant.Merchant{}, 0, fail(CodeInvalidArgument, "商户不存在")
 	}
 
 	value, err := s.merchants.FindByNo(ctx, pid)
 	if errors.Is(err, port.ErrNotFound) {
-		return merchant.Merchant{}, fail(CodeInvalidArgument, "商户不存在")
+		return merchant.Merchant{}, 0, fail(CodeInvalidArgument, "商户不存在")
 	}
 	if err != nil {
-		return merchant.Merchant{}, wrap(CodeDependency, "查询商户失败", err)
+		return merchant.Merchant{}, 0, wrap(CodeDependency, "查询商户失败", err)
 	}
 	if !value.Enabled {
-		return merchant.Merchant{}, fail(CodeInvalidArgument, "商户不存在")
+		return merchant.Merchant{}, 0, fail(CodeInvalidArgument, "商户不存在")
 	}
 
 	if err := epay.RejectAmbiguous(params); err != nil {
-		return merchant.Merchant{}, fail(CodeInvalidSignature, "签名错误")
+		return merchant.Merchant{}, 0, fail(CodeInvalidSignature, "签名错误")
 	}
-	secrets, err := s.v1SecretsForVerify(ctx, value)
+
+	v1Keys, err := s.merchantKeys.FindAllForVerify(ctx, value.ID, merchant.ProtocolEPayV1)
 	if err != nil {
-		return merchant.Merchant{}, err
+		return merchant.Merchant{}, 0, wrap(CodeDependency, "读取商户密钥失败", err)
 	}
+	v2Keys, err := s.merchantKeys.FindAllForVerify(ctx, value.ID, merchant.ProtocolEPayV2)
+	if err != nil {
+		return merchant.Merchant{}, 0, wrap(CodeDependency, "读取商户密钥失败", err)
+	}
+	if len(v1Keys) == 0 && len(v2Keys) == 0 {
+		// 没有密钥行 == 该协议未开通（密钥本身就是开通凭据）。
+		// 文案沿用 V1 时期原文：存量调用方与测试依赖它，且「未开通」是设计允许的对外状态。
+		return merchant.Merchant{}, 0, fail(CodeConfiguration, "该商户未开通 V1 接口")
+	}
+
 	// 轮换期商户仍在用上一代密钥签名，必须两代都试。
 	// 只试当前代会让轮换后所有在途请求失败，而商户侧只看到「签名错误」，
 	// 排查方向会被引向「密钥配错」，实际只是没来得及换 key。
-	for _, secretText := range secrets {
-		if verifyErr := epay.VerifyV1(params, secretText, params["sign"]); verifyErr == nil {
-			return value, nil
+	if len(v1Keys) > 0 {
+		for _, secretText := range s.decryptV1Secrets(value.ID, v1Keys) {
+			if verifyErr := epay.VerifyV1(params, secretText, params["sign"]); verifyErr == nil {
+				return value, merchant.ProtocolEPayV1, nil
+			}
 		}
 	}
-	return merchant.Merchant{}, fail(CodeInvalidSignature, "签名错误")
+	if len(v2Keys) > 0 {
+		// 先校验时间戳再验签：反过来等于用请求里的 timestamp 覆盖后跳过时效检查，
+		// 重放防护会形同虚设（设计 §5.5 #6）。
+		if epay.TimestampValid(params["timestamp"], s.clock.Now(), epayTimestampSkew) {
+			for _, key := range v2Keys {
+				// V2 必须用该行自己的商户公钥验签：轮换期两代的公钥可能不同，
+				// 统一用当前代会把上一代签名的在途请求全部判死。
+				if strings.TrimSpace(key.PeerPublicKey) == "" {
+					continue
+				}
+				if verifyErr := epay.VerifyV2(params, []byte(key.PeerPublicKey), params["sign"]); verifyErr == nil {
+					return value, merchant.ProtocolEPayV2, nil
+				}
+			}
+		}
+	}
+	return merchant.Merchant{}, 0, fail(CodeInvalidSignature, "签名错误")
 }
 
-// v1SecretsForVerify 取出该商户 V1 的全部可验签密钥（当前代在前、上一代在后）。
-//
-// 用途只有一个：验签（商户发起签名）。轮换期必须两代都认——商户换 key 需要时间，
-// 只认当前代会让窗口内所有请求报「签名错误」，而真正原因只是密钥没换完。
+// decryptV1Secrets 解密该商户 V1 的全部可验签密钥（当前代在前、上一代在后）。
 //
 // 对外文案收敛（安全审计 P3，设计 §5.4 错误码表之外不留第 4 个可区分状态）：
 // 「密钥链路坏了」（未配主密钥、密文解不开、明文格式非法）对外一律与真正的验签失败
 // 同码同文案 `invalid_signature / 签名错误`。否则未鉴权者只要拿一个存在的 pid 发一次
 // 请求，就能区分「商户存在但密钥链路坏了」与「签名不对」，把错误码表变成探测面。
 // 真实原因只落内部日志（带 merchant_id 与 cause），排障靠日志不靠响应。
-// 「该商户未开通 V1 接口」保持不变：那是设计明确允许的对外状态，且与「密钥损坏」是
-// 两件事——前者是商户还没开通，后者是我方数据/配置坏了。
-func (s *EPayService) v1SecretsForVerify(ctx context.Context, value merchant.Merchant) ([]string, error) {
-	keys, err := s.merchantKeys.FindAllForVerify(ctx, value.ID, merchant.ProtocolEPayV1)
-	if err != nil {
-		return nil, wrap(CodeDependency, "读取商户密钥失败", err)
-	}
-	if len(keys) == 0 {
-		// 没有密钥行 == 该协议未开通（密钥本身就是开通凭据）。
-		return nil, fail(CodeConfiguration, "该商户未开通 V1 接口")
-	}
+func (s *EPayService) decryptV1Secrets(merchantID int64, keys []merchant.Key) []string {
 	if s.masterKeys == nil {
 		// 未配主密钥时绝不退化为「跳过验签」：那等于任何人可伪造任意商户下单。
 		s.warnKeyChainOnce(0, "未配置主密钥", nil)
-		return nil, fail(CodeInvalidSignature, "签名错误")
+		return nil
 	}
 
 	secrets := make([]string, 0, len(keys))
@@ -219,22 +250,21 @@ func (s *EPayService) v1SecretsForVerify(ctx context.Context, value merchant.Mer
 		plain, openErr := s.masterKeys.Open(key.SecretCipher, key.SecretNonce, key.AAD(), key.KeyVersion)
 		if openErr != nil {
 			// 两代的 master key 版本可能不同，单代解不开不应拖累另一代。
-			s.warnKeyChainOnce(value.ID, "密钥解密失败 key_version="+strconv.Itoa(key.KeyVersion), openErr)
+			s.warnKeyChainOnce(merchantID, "密钥解密失败 key_version="+strconv.Itoa(key.KeyVersion), openErr)
 			continue
 		}
 		secretText := string(plain)
 		if !merchant.IsValidV1Secret(secretText) {
 			// 编码/截断 bug 必须在解密点暴露，否则只会在验签阶段表现为「签名错误」。
-			s.warnKeyChainOnce(value.ID, "密钥格式无效 key_version="+strconv.Itoa(key.KeyVersion), nil)
+			s.warnKeyChainOnce(merchantID, "密钥格式无效 key_version="+strconv.Itoa(key.KeyVersion), nil)
 			continue
 		}
 		secrets = append(secrets, secretText)
 	}
 	if len(secrets) == 0 {
-		s.warnKeyChainOnce(value.ID, "无可用验签密钥 keys="+strconv.Itoa(len(keys)), nil)
-		return nil, fail(CodeInvalidSignature, "签名错误")
+		s.warnKeyChainOnce(merchantID, "无可用验签密钥 keys="+strconv.Itoa(len(keys)), nil)
 	}
-	return secrets, nil
+	return secrets
 }
 
 // warnKeyChainOnce 按 (merchant_id, 原因类别) 只记一次真实原因。
@@ -258,6 +288,15 @@ func (s *EPayService) warnKeyChainOnce(merchantID int64, reason string, cause er
 // 但不复用 OrderService.Create —— 那条路径强依赖 settings.key 的 VMQ 验签
 // 与全局 notifyUrl 回落，两者都是 EPay 明确不允许的（每商户自带密钥与回调地址）。
 func (s *EPayService) Create(ctx context.Context, input EPayCreateInput) (EPayCreateResult, error) {
+	// 协议来自 Authenticate 的验签结果，不是报文里的 sign_type。
+	// 空值按 V1 处理：既有调用方（含测试）构造该结构时不填这个字段。
+	protocol := input.Protocol
+	if protocol == 0 {
+		protocol = merchant.ProtocolEPayV1
+	}
+	if !protocol.Valid() {
+		return EPayCreateResult{}, fail(CodeInvalidArgument, "协议版本无效")
+	}
 	paymentType, priceCents, err := validateEPayCreateInput(input)
 	if err != nil {
 		return EPayCreateResult{}, err
@@ -329,7 +368,8 @@ func (s *EPayService) Create(ctx context.Context, input EPayCreateInput) (EPayCr
 			value := order.Order{
 				MerchantID: input.MerchantID,
 				// 落库 protocol 之后，回调与同步回跳才知道该用哪把密钥签名（设计 §6.4 / §6.6）。
-				Protocol:          merchant.ProtocolEPayV1,
+				// 这里必须用验签通过的协议，写死 V1 会让 V2 商户收到验不过的回调。
+				Protocol:          protocol,
 				OrderID:           orderID,
 				PublicToken:       publicToken,
 				PayID:             input.OutTradeNo,
@@ -601,4 +641,29 @@ func exactCodeRequired(raw string) bool {
 	default:
 		return true
 	}
+}
+
+// SignEPayResponse 给 V2 的同步响应补 timestamp 并用平台私钥签名。
+//
+// 为什么必须在响应侧也签：V2 商户用平台公钥验响应，缺签名或签名过期都会按
+// 「响应不可信」处理；而 timestamp 必须参与签名，否则固定签名在 +300s 后必然失效，
+// 商户会把「签名过期」误判成「密钥配错」（设计 §5.5 #7）。
+//
+// fields 传副本：调用方手里的结构要继续用于 JSON 序列化，
+// 在里面塞 timestamp 会改变报文形状（V1 的字段集必须逐字节不变）。
+func (s *EPayService) SignEPayResponse(ctx context.Context, merchantID int64, fields map[string]string) (timestamp, sign string, err error) {
+	privatePEM, err := merchantV2PrivateKey(ctx, s.merchantKeys, s.masterKeys, merchantID)
+	if err != nil {
+		return "", "", err
+	}
+	signed := make(map[string]string, len(fields)+1)
+	for name, value := range fields {
+		signed[name] = value
+	}
+	epay.AppendTimestamp(signed, s.clock.Now())
+	sign, err = epay.SignV2(signed, privatePEM)
+	if err != nil {
+		return "", "", err
+	}
+	return signed["timestamp"], sign, nil
 }

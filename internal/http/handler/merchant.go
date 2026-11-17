@@ -94,10 +94,23 @@ func createMerchantHandler(service MerchantManager) gin.HandlerFunc {
 			return
 		}
 
+		// protocol 缺省为 V1：既有调用方/测试都不传这个字段，默认值必须保持向后兼容。
+		protocol := merchant.ProtocolEPayV1
+		if rawProtocol, ok := params["protocol"]; ok && strings.TrimSpace(rawProtocol) != "" {
+			value, parseErr := strconv.Atoi(strings.TrimSpace(rawProtocol))
+			parsed := merchant.Protocol(value)
+			if parseErr != nil || !parsed.Valid() {
+				c.JSON(http.StatusOK, php.NewEnvelope(400, "协议版本无效，只支持 1 或 2", nil))
+				return
+			}
+			protocol = parsed
+		}
 		result, err := service.Create(c.Request.Context(), usecase.CreateMerchantInput{
-			Name:         params["name"],
-			CloseMinutes: closeMinutes,
-			Note:         params["note"],
+			Name:          params["name"],
+			CloseMinutes:  closeMinutes,
+			Note:          params["note"],
+			Protocol:      protocol,
+			PeerPublicKey: params["peerPublicKey"],
 		})
 		if err != nil {
 			// 创建失败不动密钥，但仍要留痕：连续失败是「主密钥配错」这类部署事故的早期信号。
@@ -157,11 +170,18 @@ func updateMerchantHandler(service MerchantManager) gin.HandlerFunc {
 			return
 		}
 
+		// 只有显式传了 peerPublicKey 才改公钥：nil 表示「不动」，
+		// 空字符串则是一次明确的清空尝试，由用例层拒绝（V2 没有公钥等于开不通）。
+		var peerPublicKey *string
+		if rawPeer, ok := params["peerPublicKey"]; ok {
+			peerPublicKey = &rawPeer
+		}
 		view, err := service.Update(c.Request.Context(), id, usecase.UpdateMerchantInput{
-			Name:         params["name"],
-			Enabled:      enabled,
-			CloseMinutes: closeMinutes,
-			Note:         params["note"],
+			Name:          params["name"],
+			Enabled:       enabled,
+			CloseMinutes:  closeMinutes,
+			Note:          params["note"],
+			PeerPublicKey: peerPublicKey,
 		})
 		if err != nil {
 			writeMerchantError(c, err)

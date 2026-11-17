@@ -101,6 +101,37 @@ func HintPublicKey(publicPEM []byte) string {
 	return hex.EncodeToString(sum[:])[:hintPublicKeyLength]
 }
 
+// NormalizeRSAPublicKeyPEM 校验并把商户提供的公钥规范化为 PKIX PEM。
+//
+// 为什么必须在这里校验而不是等到第一次验签：V2 的 peer_public_key 是「开通凭据」，
+// 存进库里的必须是一把能用的公钥。若允许存垃圾，商户下单时才报错，而对外只能回
+//「签名错误」——运维会去查商户配置，实际是我方库里存了一坨坏数据，方向全错。
+//
+// 同时做规范化：不同来源（openssl、Java keytool、在线工具）给出的 PEM 行宽、
+// 结尾换行、CRLF 都可能不同，规范化后 HintPublicKey 才稳定可比对。
+func NormalizeRSAPublicKeyPEM(pemText string) (string, error) {
+	text := strings.TrimSpace(strings.ReplaceAll(pemText, "\r\n", "\n"))
+	if text == "" {
+		return "", fmt.Errorf("公钥为空")
+	}
+	block, _ := pem.Decode([]byte(text))
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return "", fmt.Errorf("不是 PEM 编码的 PUBLIC KEY")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("公钥解析失败: %w", err)
+	}
+	key, ok := parsed.(*rsa.PublicKey)
+	if !ok {
+		return "", fmt.Errorf("不是 RSA 公钥")
+	}
+	if key.N.BitLen() < 2048 {
+		return "", fmt.Errorf("RSA 公钥长度 %d 位，至少需要 2048 位", key.N.BitLen())
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: block.Bytes})), nil
+}
+
 // randomFromAlphabet 用 crypto/rand 逐字符取料。
 // 不用 math/rand：它的种子在容器里可能来自同一时刻，重启后生成重复商户号与密钥。
 // 也不用「随机字节取模」：256 不能被 31 整除，取模会让前半段字符出现得更频繁，

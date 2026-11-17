@@ -56,6 +56,11 @@ type CreateMerchantInput struct {
 	// CloseMinutes 为 0 表示跟随全局 settings.close；原生订单不看这个字段。
 	CloseMinutes int
 	Note         string
+	// Protocol 为空（0）按 V1 处理：既有调用方与测试都不传这个字段。
+	Protocol merchant.Protocol
+	// PeerPublicKey 仅 V2 使用：接入方的 RSA 公钥（PKIX PEM），用于验它发来的签名。
+	// V2 是双向签名，没有这把公钥就无法验签，因此它是 V2 的「开通凭据」。
+	PeerPublicKey string
 }
 
 type CreateMerchantResult struct {
@@ -76,6 +81,9 @@ type UpdateMerchantInput struct {
 	Enabled      bool
 	CloseMinutes int
 	Note         string
+	// PeerPublicKey 非 nil 时更新该商户 V2 的商户公钥（商户自己重新生成密钥后用）。
+	// nil 表示「不改」：更新是全量语义，但公钥不该被一个没填的字段清空。
+	PeerPublicKey *string
 }
 
 // MerchantView 是管理端列表/更新后的视图：只有辨认信息与协议开通状态。
@@ -122,13 +130,33 @@ func NewMerchantService(deps MerchantServiceDeps) (*MerchantService, error) {
 	}, nil
 }
 
-// Create 创建商户并同时开通 EPay V1（生成 32 位共享密钥、加密入库、只回一次明文）。
-// V2 默认不开通：它需要接入方的商户公钥，创建时拿不到。
+// Create 创建商户并开通 EPay 协议。
+//
+// V1：生成 32 位共享密钥、加密入库、只回一次明文。
+// V2：需要接入方先提供商户公钥（双向签名的验签侧），据此生成平台 RSA 密钥对，
+// 私钥加密入库、平台公钥可反复导出。
 func (s *MerchantService) Create(ctx context.Context, input CreateMerchantInput) (CreateMerchantResult, error) {
-	// 主密钥缺失必须在写库之前拒绝。若先插商户行再失败，库里会留下一条永远开不通 V1、
+	// 主密钥缺失必须在写库之前拒绝。若先插商户行再失败，库里会留下一条永远开不通、
 	// 且看不出原因的商户，比直接报错更难收拾。
 	if s.secrets == nil {
 		return CreateMerchantResult{}, fail(CodeConfiguration, errNoMasterKeyMessage)
+	}
+	protocol := input.Protocol
+	if protocol == 0 {
+		protocol = merchant.ProtocolEPayV1
+	}
+	if !protocol.Valid() {
+		return CreateMerchantResult{}, fail(CodeInvalidArgument, "协议版本无效，只支持 1 或 2")
+	}
+	// 公钥校验放在写库之前：V2 的开通凭据必须是一把能用的公钥，
+	// 否则商户第一次下单才会暴露，而对外只能回「签名错误」，排障方向全错。
+	peerPEM := ""
+	if protocol == merchant.ProtocolEPayV2 {
+		normalized, normalizeErr := merchant.NormalizeRSAPublicKeyPEM(input.PeerPublicKey)
+		if normalizeErr != nil {
+			return CreateMerchantResult{}, fail(CodeInvalidArgument, "商户公钥无效："+normalizeErr.Error())
+		}
+		peerPEM = normalized
 	}
 	name, note, err := validateMerchantFields(input.Name, input.CloseMinutes, input.Note)
 	if err != nil {
@@ -139,6 +167,25 @@ func (s *MerchantService) Create(ctx context.Context, input CreateMerchantInput)
 	created, err := s.createMerchantRow(ctx, name, note, input.CloseMinutes, now)
 	if err != nil {
 		return CreateMerchantResult{}, err
+	}
+
+	// V1 与 V2 的密钥材料完全不同，但补偿语义一样：密钥写不进去就删商户行，
+	// 不能留下「没有密钥的商户」——它既不能下单，也看不出为什么。
+	if protocol == merchant.ProtocolEPayV2 {
+		publicPEM, hint, keyErr := s.sealNewV2Key(ctx, created.ID, peerPEM, now)
+		if keyErr != nil {
+			if deleteErr := s.merchants.Delete(ctx, created.ID); deleteErr != nil {
+				return CreateMerchantResult{}, wrap(CodeDependency,
+					"商户密钥写入失败且回滚失败，请人工检查该商户",
+					errors.Join(keyErr, deleteErr))
+			}
+			return CreateMerchantResult{}, keyErr
+		}
+		return CreateMerchantResult{
+			Merchant:     created,
+			PublicKeyPEM: string(publicPEM),
+			SecretHint:   hint,
+		}, nil
 	}
 
 	plain, err := s.sealNewV1Key(ctx, created.ID, now)
@@ -215,6 +262,54 @@ func (s *MerchantService) sealNewV1Key(ctx context.Context, merchantID int64, no
 	return plain, nil
 }
 
+// sealNewV2Key 生成平台 RSA 密钥对，私钥加密入库，返回平台公钥与指纹。
+// 商户公钥（peerPEM）随行入库：V2 验签必须用每行自己的公钥，不能统一用当前代的。
+func (s *MerchantService) sealNewV2Key(ctx context.Context, merchantID int64, peerPEM string, now time.Time) ([]byte, string, error) {
+	privatePEM, publicPEM, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		return nil, "", wrap(CodeDependency, "生成平台密钥对失败", err)
+	}
+	hint := merchant.HintPublicKey(publicPEM)
+	key := merchant.Key{
+		MerchantID:    merchantID,
+		Protocol:      merchant.ProtocolEPayV2,
+		Generation:    merchant.GenerationCurrent,
+		PeerPublicKey: peerPEM,
+		Hint:          hint,
+		CreatedAt:     now,
+	}
+	if err := s.sealKey(&key, privatePEM); err != nil {
+		return nil, "", err
+	}
+	if err := s.keys.Upsert(ctx, key); err != nil {
+		return nil, "", wrap(CodeDependency, "写入商户密钥失败", err)
+	}
+	return publicPEM, hint, nil
+}
+
+// updatePeerPublicKey 替换该商户 V2 当前代的商户公钥。
+//
+// 只改公钥列，私钥密文原样保留（Upsert 会重写 secret_cipher/nonce，但值来自同一行，
+// 解密结果不变）。商户重新生成自己的密钥对时走这条路，不需要轮换平台密钥。
+func (s *MerchantService) updatePeerPublicKey(ctx context.Context, merchantID int64, raw string) error {
+	normalized, err := merchant.NormalizeRSAPublicKeyPEM(raw)
+	if err != nil {
+		return fail(CodeInvalidArgument, "商户公钥无效："+err.Error())
+	}
+	key, err := s.keys.FindActive(ctx, merchantID, merchant.ProtocolEPayV2)
+	if errors.Is(err, port.ErrNotFound) {
+		return fail(CodeInvalidState, "该商户未开通 EPay V2 接口")
+	}
+	if err != nil {
+		return wrap(CodeDependency, "读取商户密钥失败", err)
+	}
+	key.PeerPublicKey = normalized
+	if err := s.keys.Upsert(ctx, key); err != nil {
+		return wrap(CodeDependency, "更新商户公钥失败", err)
+	}
+	return nil
+}
+
 // sealKey 把明文加密进 key 的密文列。AAD 由 key 自身拼出（merchant_id/protocol/generation/purpose），
 // 因此调用前必须先填好这三个字段，否则密文会被钉在错误的行上、之后谁也解不开。
 func (s *MerchantService) sealKey(key *merchant.Key, plain []byte) error {
@@ -273,6 +368,13 @@ func (s *MerchantService) Update(ctx context.Context, id int64, input UpdateMerc
 			return MerchantView{}, fail(CodeNotFound, "商户不存在")
 		}
 		return MerchantView{}, wrap(CodeDependency, "更新商户失败", err)
+	}
+	// 公钥更新放在商户行更新之后：它是 V2 的验签凭据，校验不过要整体失败，
+	// 不能先改了名字再报「公钥无效」——运营会以为改了两次。
+	if input.PeerPublicKey != nil {
+		if err := s.updatePeerPublicKey(ctx, id, *input.PeerPublicKey); err != nil {
+			return MerchantView{}, err
+		}
 	}
 	return s.viewOf(ctx, updated)
 }

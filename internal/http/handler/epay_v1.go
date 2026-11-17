@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,9 @@ const (
 
 	// epayMessageNotImplemented 用于 api.php 里未开通的 act。
 	epayMessageNotImplemented = "接口未开通"
+	// epayMessageUnknown 用于「我方无法生成合规响应」这类内部失败：不暴露细节，
+	// 也不能伪装成商户参数问题。
+	epayMessageUnknown = "服务异常"
 	// epayMessageAmbiguousParams 与验签失败同文案：设计 §5.5 #11 要求对外不可区分，
 	// 否则攻击者能靠「参数重复」与「签名错误」的差异判断自己离撞库成功还有多远。
 	epayMessageAmbiguousParams = "签名错误"
@@ -36,7 +40,9 @@ const (
 
 // EPayManager 是 EPay V1 三个入口依赖的窄接口，由 usecase.EPayService 实现。
 type EPayManager interface {
-	Authenticate(context.Context, map[string]string) (merchant.Merchant, error)
+	Authenticate(context.Context, map[string]string) (merchant.Merchant, merchant.Protocol, error)
+	// SignEPayResponse 给 V2 的同步响应补 timestamp 并用平台私钥签名；V1 不需要。
+	SignEPayResponse(context.Context, int64, map[string]string) (timestamp, sign string, err error)
 	Create(context.Context, usecase.EPayCreateInput) (usecase.EPayCreateResult, error)
 	Query(context.Context, int64, string) (usecase.EPayQueryResult, error)
 }
@@ -69,12 +75,12 @@ func (h *EPayV1Handler) Submit(c *gin.Context) {
 		writePaymentErrorHTML(c, epayParamErrorMessage(err))
 		return
 	}
-	identity, err := h.epay.Authenticate(ctx, params)
+	identity, protocol, err := h.epay.Authenticate(ctx, params)
 	if err != nil {
 		writePaymentErrorHTML(c, epayErrorMessage(err))
 		return
 	}
-	result, err := h.epay.Create(ctx, epayCreateInput(identity, params))
+	result, err := h.epay.Create(ctx, epayCreateInput(identity, protocol, params))
 	if err != nil {
 		writePaymentErrorHTML(c, epayErrorMessage(err))
 		return
@@ -92,25 +98,39 @@ func (h *EPayV1Handler) MAPI(c *gin.Context) {
 		writeEPayError(c, epayParamErrorMessage(err))
 		return
 	}
-	identity, err := h.epay.Authenticate(ctx, params)
+	identity, protocol, err := h.epay.Authenticate(ctx, params)
 	if err != nil {
 		writeEPayError(c, epayErrorMessage(err))
 		return
 	}
-	result, err := h.epay.Create(ctx, epayCreateInput(identity, params))
+	result, err := h.epay.Create(ctx, epayCreateInput(identity, protocol, params))
 	if err != nil {
 		writeEPayError(c, epayErrorMessage(err))
 		return
 	}
 
-	c.JSON(http.StatusOK, epayMAPIResponse{
+	response := epayMAPIResponse{
 		Code:      epaySuccessCode,
 		Msg:       "",
 		TradeNo:   result.TradeNo,
 		PayURL:    result.PayURL,
 		Qrcode:    result.Qrcode,
 		URLScheme: "",
-	})
+	}
+	if protocol == merchant.ProtocolEPayV2 {
+		// V2 的响应必须带 timestamp 并签名（设计 §5.3 / §5.5 #7）：
+		// 商户端用平台公钥验，缺签名它会直接判响应不可信。
+		timestamp, sign, signErr := h.epay.SignEPayResponse(ctx, identity.ID, map[string]string{
+			"code": strconv.Itoa(epaySuccessCode), "trade_no": result.TradeNo,
+			"payurl": result.PayURL, "qrcode": result.Qrcode,
+		})
+		if signErr != nil {
+			writeEPayError(c, epayMessageUnknown)
+			return
+		}
+		response.Timestamp, response.Sign, response.SignType = timestamp, sign, "RSA"
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // API 处理 api.php：只实现 act=order（单笔查单）。
@@ -131,7 +151,7 @@ func (h *EPayV1Handler) API(c *gin.Context) {
 		return
 	}
 
-	identity, err := h.epay.Authenticate(ctx, params)
+	identity, protocol, err := h.epay.Authenticate(ctx, params)
 	if err != nil {
 		writeEPayError(c, epayErrorMessage(err))
 		return
@@ -142,7 +162,7 @@ func (h *EPayV1Handler) API(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, epayQueryResponse{
+	response := epayQueryResponse{
 		Code:        epaySuccessCode,
 		Msg:         "",
 		Pid:         identity.No,
@@ -155,7 +175,23 @@ func (h *EPayV1Handler) API(c *gin.Context) {
 		AddTime:     epayTimeText(result.AddTime),
 		EndTime:     epayTimeText(result.EndTime),
 		Param:       result.Param,
-	})
+	}
+	if protocol == merchant.ProtocolEPayV2 {
+		// 查单响应同样需要重签：V2 商户拿到的若是无签名报文，会按「响应不可信」处理。
+		timestamp, sign, signErr := h.epay.SignEPayResponse(ctx, identity.ID, map[string]string{
+			"code": strconv.Itoa(epaySuccessCode), "pid": identity.No, "trade_no": result.TradeNo,
+			"out_trade_no": result.OutTradeNo, "type": result.Type, "name": result.Name,
+			"money": result.Money, "trade_status": result.TradeStatus,
+			"addtime": epayTimeText(result.AddTime), "endtime": epayTimeText(result.EndTime),
+			"param": result.Param,
+		})
+		if signErr != nil {
+			writeEPayError(c, epayMessageUnknown)
+			return
+		}
+		response.Timestamp, response.Sign, response.SignType = timestamp, sign, "RSA"
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // epayMAPIResponse 是 mapi.php 的成功响应。
@@ -168,6 +204,10 @@ type epayMAPIResponse struct {
 	PayURL    string `json:"payurl"`
 	Qrcode    string `json:"qrcode"`
 	URLScheme string `json:"urlscheme"`
+	// 以下三项只在 V2 响应里出现；V1 用 omitempty 保持既有报文逐字节不变。
+	Timestamp string `json:"timestamp,omitempty"`
+	Sign      string `json:"sign,omitempty"`
+	SignType  string `json:"sign_type,omitempty"`
 }
 
 // epayQueryResponse 是 api.php?act=order 的成功响应（字段见设计 §5.3）。
@@ -185,6 +225,10 @@ type epayQueryResponse struct {
 	AddTime     string `json:"addtime"`
 	EndTime     string `json:"endtime"`
 	Param       string `json:"param"`
+	// 同上：仅 V2 出现。
+	Timestamp string `json:"timestamp,omitempty"`
+	Sign      string `json:"sign,omitempty"`
+	SignType  string `json:"sign_type,omitempty"`
 }
 
 type epayErrorResponse struct {
@@ -254,10 +298,10 @@ func isEPayNameVariant(name string) bool {
 
 // epayCreateInput 把已验签的参数映射成用例入参。
 // money/name 等一律传原始文本：改写任意一个字符都会让商户侧验签失败。
-func epayCreateInput(identity merchant.Merchant, params map[string]string) usecase.EPayCreateInput {
+func epayCreateInput(identity merchant.Merchant, protocol merchant.Protocol, params map[string]string) usecase.EPayCreateInput {
 	return usecase.EPayCreateInput{
 		MerchantID: identity.ID,
-		Protocol:   merchant.ProtocolEPayV1,
+		Protocol:   protocol,
 		OutTradeNo: params["out_trade_no"],
 		Type:       params["type"],
 		Name:       params["name"],

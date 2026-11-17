@@ -17,8 +17,12 @@ import (
 // 本文件断言的是路由表形状，不执行任何用例逻辑，因此三个方法一律返回零值。
 type epayRouteStub struct{}
 
-func (epayRouteStub) Authenticate(context.Context, map[string]string) (merchant.Merchant, error) {
-	return merchant.Merchant{}, nil
+func (epayRouteStub) Authenticate(context.Context, map[string]string) (merchant.Merchant, merchant.Protocol, error) {
+	return merchant.Merchant{}, 0, nil
+}
+
+func (epayRouteStub) SignEPayResponse(context.Context, int64, map[string]string) (string, string, error) {
+	return "", "", nil
 }
 
 func (epayRouteStub) Create(context.Context, usecase.EPayCreateInput) (usecase.EPayCreateResult, error) {
