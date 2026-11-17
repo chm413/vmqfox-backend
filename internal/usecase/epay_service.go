@@ -46,7 +46,8 @@ type NotifyURLValidator interface {
 
 type EPayCreateInput struct {
 	MerchantID int64
-	// Protocol 固定 merchant.ProtocolEPayV1；留成字段是为了让回调/查单复用同一结构时不混淆。
+	// Protocol 由 Authenticate 回传（V1 或 V2）；下单时落进 orders.protocol，
+	// 回调签名按它选密钥。空值按 V1 处理，兼容不填该字段的既有调用方。
 	Protocol   merchant.Protocol
 	OutTradeNo string
 	Type       string
@@ -514,8 +515,10 @@ func validateEPayCreateInput(input EPayCreateInput) (payment.Type, int64, error)
 	if input.MerchantID <= 0 {
 		return 0, 0, fail(CodeInvalidArgument, "商户不存在")
 	}
-	if input.Protocol != merchant.ProtocolEPayV1 {
-		return 0, 0, fail(CodeConfiguration, "该商户未开通 V1 接口")
+	// 这里只校验协议是否合法，不再要求必须是 V1：V2 开通后同样走这条下单路径，
+	// 继续写死 V1 会把 V2 商户挡在「该商户未开通 V1 接口」上（真机 E2E 实测踩到）。
+	if !input.Protocol.Valid() {
+		return 0, 0, fail(CodeConfiguration, "协议版本无效")
 	}
 	if input.OutTradeNo == "" || len(input.OutTradeNo) > epayOutTradeNoMaxLen {
 		return 0, 0, fail(CodeInvalidArgument, "out_trade_no 缺失或超长")

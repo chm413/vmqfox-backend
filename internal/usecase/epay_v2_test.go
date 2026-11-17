@@ -279,3 +279,27 @@ func TestEPaySignResponseV2Verifiable(t *testing.T) {
 		t.Fatal("篡改响应字段后必须验签失败")
 	}
 }
+
+// TestEPayCreateV2PersistsProtocol 覆盖 V2 下单：
+// 这笔单必须落 protocol=2，否则回调会按 V1 用共享密钥签名，
+// 商户拿平台公钥验不过——现象是「下单成功、回调永远验签失败」。
+//
+// 这条用例的直接来源是真机端到端测试：validateEPayCreateInput 里曾有一条
+// 「协议必须等于 V1」的旧守卫，单测没覆盖，结果 V2 商户下单被拒「该商户未开通 V1 接口」。
+func TestEPayCreateV2PersistsProtocol(t *testing.T) {
+	service, env := epayV1TestService(t, nil)
+	env.qrcodes.exact[1] = "https://qr.test/0.01"
+
+	input := epayV1Input("V2-ORDER-1", "0.01")
+	input.Protocol = merchant.ProtocolEPayV2
+
+	if _, err := service.Create(context.Background(), input); err != nil {
+		t.Fatalf("V2 下单应成功，实际 err=%v", err)
+	}
+	if len(env.orders.created) != 1 {
+		t.Fatalf("应写入 1 笔订单，实际 %d", len(env.orders.created))
+	}
+	if got := env.orders.created[0].Protocol; got != merchant.ProtocolEPayV2 {
+		t.Fatalf("订单协议必须是 V2（决定回调签名密钥），实际 %v", got)
+	}
+}
