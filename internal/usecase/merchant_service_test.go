@@ -133,6 +133,22 @@ func (k *merchantServiceTestKeys) Upsert(_ context.Context, value merchant.Key) 
 	return nil
 }
 
+// UpdatePeerPublicKey 与真实仓储一致：覆盖该商户该协议的全部代。
+func (k *merchantServiceTestKeys) UpdatePeerPublicKey(_ context.Context, merchantID int64, protocol merchant.Protocol, peerPublicKey string) error {
+	found := false
+	for id, value := range k.rows {
+		if value.MerchantID == merchantID && value.Protocol == protocol {
+			value.PeerPublicKey = peerPublicKey
+			k.rows[id] = value
+			found = true
+		}
+	}
+	if !found {
+		return port.ErrNotFound
+	}
+	return nil
+}
+
 func (k *merchantServiceTestKeys) Rotate(_ context.Context, merchantID int64, protocol merchant.Protocol, next merchant.Key) error {
 	if k.rotateErr != nil {
 		return k.rotateErr
@@ -569,5 +585,94 @@ func TestMerchantServiceUpdateAndValidation(t *testing.T) {
 func TestNewMerchantServiceRequiresRepositories(t *testing.T) {
 	if _, err := NewMerchantService(MerchantServiceDeps{}); err == nil {
 		t.Fatal("缺少仓储时构造商户用例必须失败")
+	}
+}
+
+// TestMerchantServiceUpdatePeerKeyCoversAllGenerations 锁定安全修复：
+// 换商户公钥必须覆盖**全部代**，否则上一代残留的旧公钥仍能验签——
+// 商户私钥泄露后走「换公钥」，旧私钥等于没吊销。
+func TestMerchantServiceUpdatePeerKeyCoversAllGenerations(t *testing.T) {
+	box := newMerchantServiceTestBox(t)
+	service, _, keys := newMerchantServiceUnderTest(t, box)
+
+	_, oldPeer, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成旧商户公钥失败: %v", err)
+	}
+	created, err := service.Create(context.Background(), CreateMerchantInput{
+		Name:          "换钥商户",
+		Protocol:      merchant.ProtocolEPayV2,
+		PeerPublicKey: string(oldPeer),
+	})
+	if err != nil {
+		t.Fatalf("创建 V2 商户失败: %v", err)
+	}
+
+	// 手工补一条上一代（模拟该商户已经轮换过平台密钥）：
+	// 真实轮换会原样保留 peer_public_key，所以上一代此刻仍是旧公钥。
+	previousID := merchantServiceTestKeyID(created.Merchant.ID, merchant.ProtocolEPayV2, merchant.GenerationPrevious)
+	keys.rows[previousID] = merchant.Key{
+		MerchantID:    created.Merchant.ID,
+		Protocol:      merchant.ProtocolEPayV2,
+		Generation:    merchant.GenerationPrevious,
+		PeerPublicKey: string(oldPeer),
+	}
+
+	_, newPeer, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成新商户公钥失败: %v", err)
+	}
+	peerText := string(newPeer)
+	if _, err := service.Update(context.Background(), created.Merchant.ID, UpdateMerchantInput{
+		Name:          "换钥商户",
+		Enabled:       true,
+		CloseMinutes:  30,
+		PeerPublicKey: &peerText,
+	}); err != nil {
+		t.Fatalf("更新商户公钥失败: %v", err)
+	}
+
+	normalized, err := merchant.NormalizeRSAPublicKeyPEM(peerText)
+	if err != nil {
+		t.Fatalf("规范化新公钥失败: %v", err)
+	}
+	current := keys.rows[merchantServiceTestKeyID(created.Merchant.ID, merchant.ProtocolEPayV2, merchant.GenerationCurrent)]
+	if current.PeerPublicKey != normalized {
+		t.Fatalf("当前代公钥未更新，实际 %q", current.PeerPublicKey)
+	}
+	previous := keys.rows[previousID]
+	if previous.PeerPublicKey != normalized {
+		t.Fatalf("上一代仍残留旧公钥（旧私钥可继续签单），实际 %q", previous.PeerPublicKey)
+	}
+}
+
+// TestMerchantServiceUpdatePeerKeyRequiresV2 锁定 Low 修复：
+// 未开通 V2 的商户提交公钥时，必须在写商户行之前失败，
+// 不能「名字已改、接口报 400」。
+func TestMerchantServiceUpdatePeerKeyRequiresV2(t *testing.T) {
+	box := newMerchantServiceTestBox(t)
+	service, repo, _ := newMerchantServiceUnderTest(t, box)
+
+	created, err := service.Create(context.Background(), CreateMerchantInput{Name: "V1 商户"})
+	if err != nil {
+		t.Fatalf("创建 V1 商户失败: %v", err)
+	}
+
+	_, peer, err := merchant.NewRSAKeyPair()
+	if err != nil {
+		t.Fatalf("生成商户公钥失败: %v", err)
+	}
+	peerText := string(peer)
+	_, err = service.Update(context.Background(), created.Merchant.ID, UpdateMerchantInput{
+		Name:          "改名后应保持原名",
+		Enabled:       true,
+		CloseMinutes:  30,
+		PeerPublicKey: &peerText,
+	})
+	if err == nil {
+		t.Fatal("未开通 V2 的商户提交公钥必须失败")
+	}
+	if stored := repo.items[created.Merchant.ID]; stored.Name != "V1 商户" {
+		t.Fatalf("失败时不得写入商户行，实际名称已变为 %q", stored.Name)
 	}
 }

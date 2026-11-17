@@ -287,25 +287,36 @@ func (s *MerchantService) sealNewV2Key(ctx context.Context, merchantID int64, pe
 	return publicPEM, hint, nil
 }
 
-// updatePeerPublicKey 替换该商户 V2 当前代的商户公钥。
+// updatePeerPublicKey 替换该商户 V2 的商户公钥，**覆盖全部代**。
 //
-// 只改公钥列，私钥密文原样保留（Upsert 会重写 secret_cipher/nonce，但值来自同一行，
-// 解密结果不变）。商户重新生成自己的密钥对时走这条路，不需要轮换平台密钥。
+// 覆盖全部代是安全要求而不是顺手：验签会逐代尝试（轮换期要兼容在途签名），
+// 只改当前代的话上一代仍残留旧公钥——商户私钥泄露后走「换公钥」流程，
+// 旧私钥依旧能签单成功，直到某次平台密钥轮换把那一行删掉（可能永不发生）。
+// 只改当前代等于「换了个寂寞」。
 func (s *MerchantService) updatePeerPublicKey(ctx context.Context, merchantID int64, raw string) error {
 	normalized, err := merchant.NormalizeRSAPublicKeyPEM(raw)
 	if err != nil {
 		return fail(CodeInvalidArgument, "商户公钥无效："+err.Error())
 	}
-	key, err := s.keys.FindActive(ctx, merchantID, merchant.ProtocolEPayV2)
-	if errors.Is(err, port.ErrNotFound) {
-		return fail(CodeInvalidState, "该商户未开通 EPay V2 接口")
+	if err := s.keys.UpdatePeerPublicKey(ctx, merchantID, merchant.ProtocolEPayV2, normalized); err != nil {
+		if errors.Is(err, port.ErrNotFound) {
+			return fail(CodeInvalidState, "该商户未开通 EPay V2 接口")
+		}
+		return wrap(CodeDependency, "更新商户公钥失败", err)
 	}
+	return nil
+}
+
+// ensurePeerPublicKeyUpdatable 在写商户行之前确认 V2 已开通。
+//
+// 顺序错了会出现「名字已改、接口报 400」：运营以为整次保存失败，实际库里已落了一半。
+func (s *MerchantService) ensurePeerPublicKeyUpdatable(ctx context.Context, merchantID int64) error {
+	keys, err := s.keys.FindAllForVerify(ctx, merchantID, merchant.ProtocolEPayV2)
 	if err != nil {
 		return wrap(CodeDependency, "读取商户密钥失败", err)
 	}
-	key.PeerPublicKey = normalized
-	if err := s.keys.Upsert(ctx, key); err != nil {
-		return wrap(CodeDependency, "更新商户公钥失败", err)
+	if len(keys) == 0 {
+		return fail(CodeInvalidState, "该商户未开通 EPay V2 接口")
 	}
 	return nil
 }
@@ -355,11 +366,14 @@ func (s *MerchantService) Update(ctx context.Context, id int64, input UpdateMerc
 		return MerchantView{}, err
 	}
 
-	// 公钥校验必须在写商户行之前：先改名字再报「公钥无效」，
+	// 公钥相关的两项检查都必须在写商户行之前：先改名字再报「公钥无效」或「未开通 V2」，
 	// 运营会以为自己改了两次，而库里已经落了一半改动。
 	if input.PeerPublicKey != nil {
 		if _, err := merchant.NormalizeRSAPublicKeyPEM(*input.PeerPublicKey); err != nil {
 			return MerchantView{}, fail(CodeInvalidArgument, "商户公钥无效："+err.Error())
+		}
+		if err := s.ensurePeerPublicKeyUpdatable(ctx, id); err != nil {
+			return MerchantView{}, err
 		}
 	}
 

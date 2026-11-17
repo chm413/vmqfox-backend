@@ -99,6 +99,10 @@ func (k epayMerchantKeys) FindAllForVerify(context.Context, int64, merchant.Prot
 
 func (k epayMerchantKeys) Upsert(context.Context, merchant.Key) error { return nil }
 
+func (k epayMerchantKeys) UpdatePeerPublicKey(context.Context, int64, merchant.Protocol, string) error {
+	return nil
+}
+
 func (k epayMerchantKeys) Rotate(context.Context, int64, merchant.Protocol, merchant.Key) error {
 	return nil
 }

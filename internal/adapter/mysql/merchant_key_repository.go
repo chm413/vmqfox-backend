@@ -76,6 +76,21 @@ func (r *MerchantKeyRepository) FindActive(ctx context.Context, merchantID int64
 	return row.ToDomain(), mapDatabaseError(err)
 }
 
+// UpdatePeerPublicKey 单条 UPDATE 覆盖该商户该协议全部代的商户公钥。
+//
+// 为什么不用「按代 Upsert 循环」：两条语句之间可能部分失败，留下「当前代新公钥、
+// 上一代旧公钥」的中间态，而验签会逐代尝试——旧私钥在这一刻仍然有效。
+// 单条 UPDATE 是原子的，不存在这个窗口。
+//
+// 不检查 RowsAffected：值未变化时 MySQL 的 affected 可能是 0（取决于 CLIENT_FOUND_ROWS），
+// 用 0 判断「未开通」会把「重复提交同一把公钥」误报成业务错误。
+func (r *MerchantKeyRepository) UpdatePeerPublicKey(ctx context.Context, merchantID int64, protocol merchant.Protocol, peerPublicKey string) error {
+	return databaseFromContext(ctx, r.db).
+		Model(&MerchantKeyRow{}).
+		Where("merchant_id = ? AND protocol = ?", merchantID, int8(protocol)).
+		Update("peer_public_key", peerPublicKey).Error
+}
+
 // FindAllForVerify 返回当前代与上一代（当前代在前），供验签逐一尝试。
 // 与 List 一致的语义：查不到时返回空切片 + nil 错误，由调用方决定是「未开通」还是「验签失败」，
 // 避免把「没有密钥」误报成「签名错误」。

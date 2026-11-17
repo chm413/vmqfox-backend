@@ -230,6 +230,12 @@ type MerchantKeyRepository interface {
 	// V2 必须用每行自己的 peer_public_key 验签，不能统一用当前代公钥。
 	FindAllForVerify(ctx context.Context, merchantID int64, protocol merchant.Protocol) ([]merchant.Key, error)
 	Upsert(ctx context.Context, value merchant.Key) error
+	// UpdatePeerPublicKey 覆盖该商户该协议**全部代**的商户公钥（V2 专用）。
+	//
+	// 必须覆盖全部代：验签会逐代尝试，只改当前代会让上一代残留的旧公钥继续可用——
+	// 商户私钥泄露后走「换公钥」流程，旧私钥仍能签单成功，等于没吊销。
+	// 未命中返回 ErrNotFound（该协议未开通）。
+	UpdatePeerPublicKey(ctx context.Context, merchantID int64, protocol merchant.Protocol, peerPublicKey string) error
 	// Rotate 在一个事务里删上一代、把当前代降级为上一代、写入新当前代。
 	Rotate(ctx context.Context, merchantID int64, protocol merchant.Protocol, next merchant.Key) error
 	DeleteByMerchant(ctx context.Context, merchantID int64) error

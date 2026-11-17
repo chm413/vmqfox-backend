@@ -92,6 +92,27 @@ func (k epayV1Keys) FindAllForVerify(_ context.Context, merchantID int64, protoc
 
 func (k epayV1Keys) Upsert(context.Context, merchant.Key) error { return nil }
 
+func (k epayV1Keys) UpdatePeerPublicKey(_ context.Context, merchantID int64, protocol merchant.Protocol, peerPublicKey string) error {
+	slot := epayV1KeySlot(merchantID, protocol)
+	found := false
+	if key, ok := k.active[slot]; ok {
+		key.PeerPublicKey = peerPublicKey
+		k.active[slot] = key
+		found = true
+	}
+	if keys, ok := k.verify[slot]; ok {
+		for i := range keys {
+			keys[i].PeerPublicKey = peerPublicKey
+		}
+		k.verify[slot] = keys
+		found = true
+	}
+	if !found {
+		return port.ErrNotFound
+	}
+	return nil
+}
+
 func (k epayV1Keys) Rotate(context.Context, int64, merchant.Protocol, merchant.Key) error { return nil }
 
 func (k epayV1Keys) DeleteByMerchant(context.Context, int64) error { return nil }

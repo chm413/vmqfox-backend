@@ -307,6 +307,14 @@ func (s *EPayService) Create(ctx context.Context, input EPayCreateInput) (EPayCr
 		// 这是部署配置问题，必须在下单前失败，而不是把空链接交给商户插件。
 		return EPayCreateResult{}, fail(CodeConfiguration, "未配置前台地址，无法生成支付链接")
 	}
+	// V2 的响应必须带平台私钥签名。签名能力要在这里探测：等订单落库、金额锁占好、
+	// 收银台链接生成之后再发现私钥解不开，会留下一张商户侧不存在、我方却占着金额锁的
+	// 孤儿单（要等到 close_minutes 才释放）。宁可下单前失败。
+	if protocol == merchant.ProtocolEPayV2 {
+		if _, err := merchantV2PrivateKey(ctx, s.merchantKeys, s.masterKeys, input.MerchantID); err != nil {
+			return EPayCreateResult{}, fail(CodeConfiguration, "收款通道异常")
+		}
+	}
 	if err := s.notifyURLs.ValidateNotifyURL(input.NotifyURL); err != nil {
 		// 校验失败必须**不写订单、不占金额锁**，否则会留下永远收不到回调的待支付单。
 		return EPayCreateResult{}, fail(CodeInvalidArgument, "notify_url 必须是公网可访问地址")

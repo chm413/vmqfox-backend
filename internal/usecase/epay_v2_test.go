@@ -290,6 +290,19 @@ func TestEPayCreateV2PersistsProtocol(t *testing.T) {
 	service, env := epayV1TestService(t, nil)
 	env.qrcodes.exact[1] = "https://qr.test/0.01"
 
+	// V2 下单要求平台私钥可用（响应要签名）。真实流程里创建商户时就写入了这把密钥，
+	// 这里必须同样准备，否则测的只是「缺密钥会失败」。
+	_, merchantPublicPEM, keyErr := merchant.NewRSAKeyPair()
+	if keyErr != nil {
+		t.Fatalf("生成商户密钥对失败: %v", keyErr)
+	}
+	_, platformPrivatePEM, keyErr := merchant.NewRSAKeyPair()
+	if keyErr != nil {
+		t.Fatalf("生成平台密钥失败: %v", keyErr)
+	}
+	env.keys.active[epayV1KeySlot(testMerchantID, merchant.ProtocolEPayV2)] = sealEPayV2Key(
+		t, env.box, testMerchantID, merchantPublicPEM, platformPrivatePEM)
+
 	input := epayV1Input("V2-ORDER-1", "0.01")
 	input.Protocol = merchant.ProtocolEPayV2
 
@@ -496,5 +509,33 @@ func TestEPayAuthenticateV2RequiresValidTimestamp(t *testing.T) {
 				t.Fatalf("对外应为 CodeInvalidSignature，实际 code=%v err=%v", code, err)
 			}
 		})
+	}
+}
+
+// TestEPayCreateV2FailsBeforeOrderingWhenSigningUnavailable 锁定 Medium 修复：
+// V2 商户的平台私钥不可用时，必须在写订单、占金额锁之前失败。
+//
+// 否则商户侧收到「服务异常」并重试，幂等会把同一张孤儿单一次次回放，
+// 我方金额锁被占满 close_minutes，而产生一张商户根本没看到的单。
+func TestEPayCreateV2FailsBeforeOrderingWhenSigningUnavailable(t *testing.T) {
+	service, env := epayV1TestService(t, nil)
+	env.qrcodes.exact[2] = "https://qr.test/0.02"
+	// 故意不配 V2 密钥：merchantV2PrivateKey 会返回 ErrNotFound。
+
+	input := epayV1Input("V2-NOKEY-1", "0.02")
+	input.Protocol = merchant.ProtocolEPayV2
+
+	_, err := service.Create(context.Background(), input)
+	if err == nil {
+		t.Fatal("缺少 V2 私钥时下单必须失败")
+	}
+	if code, _ := ErrorCodeOf(err); code != CodeConfiguration {
+		t.Fatalf("对外应为 CodeConfiguration（收款通道异常），实际 code=%v err=%v", code, err)
+	}
+	if len(env.orders.created) != 0 {
+		t.Fatalf("失败时不得写订单，实际 %d 笔", len(env.orders.created))
+	}
+	if len(env.locks.attempts) != 0 {
+		t.Fatalf("失败时不得占用金额锁，实际尝试 %v", env.locks.attempts)
 	}
 }
