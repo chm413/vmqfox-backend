@@ -118,26 +118,41 @@ func createMerchantHandler(service MerchantManager) gin.HandlerFunc {
 			writeMerchantError(c, err)
 			return
 		}
-		// 创建成功即下发了一把 V1 共享密钥（V2 要等接入方提供公钥），此处记下归属与指纹。
+		// 审计要记真实协议：把 V2 记成 V1，事后排查「这把密钥到底是谁的」会直接走错方向。
 		logMerchantKeyAudit(c, merchantKeyAuditLine(
 			auditEventKeyCreate,
 			result.Merchant.ID,
 			result.Merchant.No,
-			int(merchant.ProtocolEPayV1),
+			int(protocol),
 			result.SecretHint,
 			merchantOperator(c),
 		))
 
-		data := apiMerchantViewData(merchantViewOf(result.Merchant, true, result.SecretHint))
+		view := merchantViewOf(result.Merchant, protocol == merchant.ProtocolEPayV1, result.SecretHint)
+		if protocol == merchant.ProtocolEPayV2 {
+			// V2 的「开通凭据」是平台密钥对，v1Hint 那格要留给公钥指纹，不能把 V2 记成 V1 已开通。
+			view.V1Enabled = false
+			view.V1Hint = ""
+			view.V2Enabled = true
+			view.V2Hint = result.SecretHint
+		}
+		data := apiMerchantViewData(view)
 		// 明文只出现在这一次响应里：写入库成功之后才下发，之后任何接口都不再返回。
-		data["secret"] = result.SecretPlain
+		// V2 没有共享密钥，不下发空 secret——空串会让接入方以为「拿到了一把空密钥」。
+		if result.SecretPlain != "" {
+			data["secret"] = result.SecretPlain
+		}
 		data["hint"] = result.SecretHint
 		if result.PublicKeyPEM != "" {
 			data["publicKey"] = result.PublicKeyPEM
 		}
 		// 响应体里带明文密钥：绝不允许被浏览器、代理或中间缓存留在磁盘上重放。
 		c.Header("Cache-Control", "no-store")
-		c.JSON(http.StatusOK, php.NewEnvelope(200, "创建成功，请立即保存商户密钥，关闭后无法再次查看", data))
+		message := "创建成功，请立即保存商户密钥，关闭后无法再次查看"
+		if protocol == merchant.ProtocolEPayV2 {
+			message = "创建成功，请把平台公钥交给商户配置（可随时重新导出）"
+		}
+		c.JSON(http.StatusOK, php.NewEnvelope(200, message, data))
 	}
 }
 
