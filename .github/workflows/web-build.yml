@@ -1,0 +1,60 @@
+name: Web build
+
+# 为什么需要这个 workflow：前端构建（tsc -b && vite build）此前**只在打标签时的镜像构建里跑**，
+# 意味着 UI 的类型错误、依赖装不上、lockfile 不一致，可以一路绿灯进 main，直到发版才炸。
+# 本轮就踩过一次：依赖漏洞修复改了 package.json 与 lockfile，若只在发版时验证，
+# 出问题的成本是一次失败的发布。
+#
+# 为什么与 unit-tests.yml 分开：那边是纯 Go 逻辑、几十秒内必须全绿；这边要拉 pnpm 依赖树，
+# 失败面是 registry 抖动与前端类型错误。两个门禁红因不同，就该分开呈现，别互相污染结论。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # 保留手动触发，便于排查历史提交或临时复跑，无需推新 commit。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web-build:
+    name: pnpm install + tsc + vite build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      # node 24 与 Dockerfile 的 web-builder 阶段保持一致：
+      # 门禁里构建通过、镜像里构建失败，是最没有价值的一种绿灯。
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: 24
+
+      # pnpm 版本钉在 Dockerfile 使用的 11.22.0：lockfile 是 9.0，两个版本都能读，
+      # 但「门禁用一个版本、发版用另一个版本」迟早会撞上一次只在其中一边出现的解析差异。
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.22.0 --activate
+          pnpm --version
+
+      # --frozen-lockfile：改了 package.json 却忘了提交 lockfile 时立刻失败，
+      # 而不是在 CI 里悄悄解析出一棵与本地不同的依赖树。
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check and build
+        run: pnpm build
