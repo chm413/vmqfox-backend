@@ -134,6 +134,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 启动前自检：缺表说明迁移没跑。宁可拒绝启动并给出指令，
+	// 也不要把「每 10 秒一条 Table doesn't exist」留给运行时的日志。
+	if err := app.EnsureSchema(db); err != nil {
+		logger.Printf("启动自检失败: %v", err)
+		_ = closeDatabase(db)
+		os.Exit(1)
+	}
+
 	application, err := app.New(cfg, db, tokenService, logger)
 	if err != nil {
 		logger.Printf("应用组装失败: %v", err)
